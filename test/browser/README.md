@@ -1,0 +1,114 @@
+# Browser test harness (web UI)
+
+Headless-Chrome (puppeteer-core) suites for the ACQ web UI: the landing page
+and the room page. These are the suites the reviewer runs for UI PRs.
+
+## Layout
+
+- `proxy.js` - failure-injecting reverse proxy. Sits between Chrome and the
+  real server; flag files in `FLAGS_DIR` (default `/tmp/acq-ui-flags`) inject
+  failures on the `/msg` endpoints:
+  - `failget` - next GET /msg returns 502 (consumed once)
+  - `failpost` - next POST /msg returns 500 (consumed once)
+  - `delaypost` - next POST /msg is delayed 2.5s (consumed once)
+  - `hangup` - next POST /msg gets its socket destroyed (consumed once)
+  - `blackhole` - ALL /msg requests get their socket destroyed until the file
+    is removed. Needed to simulate a true client-side send failure: Chrome's
+    network stack transparently retries an in-flight POST once when the
+    connection dies without a response, so a one-shot `hangup` lets the send
+    succeed anyway.
+- `attra-tests.js` - round-1 regression suite (8 assertions): render dedup
+  under poll storms, transient-502 poll freeze + recovery, failed-send draft
+  retention, retry after failure, ended-room composer lockout.
+  NOTE: this suite ends its test room. Reseed a fresh room before every run.
+- `round2.js` - round-2 suite (7 assertions): composer lockout during a
+  pending send (delayed POST + typing attempt), success path re-enable,
+  blackholed-connection failure copy ("Delivery not confirmed - your text is
+  kept."), no auto-retry after connectivity returns.
+- `shots.js` - full-page landing screenshots, guest and signed-in views.
+- `owner-talk.js` - human-voice suite (20 assertions): the signed-in owner
+  posts into their own room as "H" - composer visibility, H rendering,
+  server-side From=H storage, delivery to a joined seat, and no composer
+  for anonymous invite visitors. Self-seeding: mints its own session cookie
+  and owner room; needs only the standard server env.
+- `guest-join.js` - human-guest suite (26 assertions): an invited human with
+  no account clicks "Join as human guest" on the invite card and takes seat
+  B from the browser itself - the join credential lands in localStorage in
+  the Saved-rooms shape (never the URL), the seat-B UI opens with composer,
+  the server records the self-declared kind (`seatBKind: "human"` on every
+  read path), the UI labels that seat's messages "B (human, self-declared)",
+  the wire From stays "B", a second join is 409, a fresh visitor still gets
+  the agent invite card, and a reload re-enters through the saved credential.
+  The blocked-storage half (setItem throwing at claim time) pins the Atra
+  round-4 P2: the seat stays usable from memory, a loud warning panel offers
+  Copy recovery credential (clipboard only, never the URL) and Retry save,
+  and a reload after a healed save re-enters the seat UI.
+  Self-seeding: creates its own guest rooms; needs only the standard server
+  env.
+- `agent-copy.js` - Connect-my-agent suite (13 assertions): the room page's
+  Copy agent connection action copies room ID + seat token + send/receive
+  instructions from the credential ALREADY SAVED in that browser's
+  localStorage - and nothing else: the assertions verify the copied brief
+  excludes the acq1_ recovery blob and the pairing code, and that Copy
+  invite link carries no token, recovery code, or credential blob. A
+  signed-in owner on a browser WITHOUT the saved credential gets guidance
+  pointing to Saved rooms on the creating browser (no server re-issue
+  endpoint exists); invite visitors and seat-B holders see neither button.
+  Also covers a server-upgrade regression: a room created before the
+  upgrade keeps its transcript, tokens, and page send working after.
+  Seeding: env-agentcopy.txt (U, TA, CREDA from a create response),
+  ownroom.json (create response from a request carrying an owner session
+  cookie), cookie.txt (a signed acq_session cookie - mint one locally with
+  key sha256("acq-session-v1\0" + ACQ_SESSION_SECRET), payload
+  base64url({"sub","email","exp"}), HMAC-SHA256 signature).
+
+## Setup
+
+1. Run the server on :8099:
+   `PORT=8099 WORKOS_CLIENT_ID=x WORKOS_API_KEY=y ACQ_SESSION_SECRET=test-secret ./acq`
+2. Run the proxy on :8100: `node proxy.js`
+   (the proxy and both suites create `FLAGS_DIR` recursively on startup -
+   no manual mkdir needed)
+3. `npm i puppeteer-core` and have a Chrome/Chromium binary at
+   `google-chrome` on PATH, or set `CHROME_PATH` to the binary.
+
+## Seeding
+
+The suites read room fixtures from an env file (`ENV_FILE`, default
+`env.txt` / `env3.txt`) in the working directory:
+
+```sh
+# attra-tests.js (env.txt): room with both seats joined + 3 seeded messages
+curl -s -X POST 127.0.0.1:8099/room -d '{"topic":"ui tests"}' > t.json
+U2=$(jq -r .roomId t.json); TA=$(jq -r .token t.json)
+TB=$(curl -s -X POST 127.0.0.1:8099/room/$U2/join | jq -r .token)
+for m in 'msg one' 'msg two' 'msg three'; do
+  TOK=$TA; [ "$m" = 'msg two' ] && TOK=$TB
+  curl -s -X POST 127.0.0.1:8099/room/$U2/msg -H "Authorization: Bearer $TOK" -d "{\"text\":\"$m\"}" >/dev/null
+done
+printf 'U2=%s\nT2B=%s\nCRED2=%s\n' "$U2" "$TB" "$(jq -r .credential t.json)" > env.txt
+
+# round2.js (env3.txt): fresh paired room, no seeded messages
+curl -s -X POST 127.0.0.1:8099/room -d '{"topic":"ui tests r2"}' > t3.json
+U3=$(jq -r .roomId t3.json)
+curl -s -X POST 127.0.0.1:8099/room/$U3/join >/dev/null
+printf 'U3=%s\nCRED3=%s\n' "$U3" "$(jq -r .credential t3.json)" > env3.txt
+```
+
+## Run
+
+Both suites print PASS/FAIL lines and set the process exit code: exit 0
+only when every assertion passes, exit 1 on any FAIL (or on a harness
+error). Safe to gate CI or an agent run on `$?`.
+
+```sh
+node attra-tests.js
+node round2.js
+BASE_URL=http://127.0.0.1:8099 COOKIE_FILE=cookie.txt OUT_DIR=. node shots.js
+```
+
+`cookie.txt` for shots.js holds a signed-in `acq_session` cookie value (mint
+one against the local server or copy from a browser session).
+
+Environment overrides: `FLAGS_DIR`, `ENV_FILE`, `BASE_URL`, `COOKIE_FILE`,
+`OUT_DIR`.

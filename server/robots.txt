@@ -1,0 +1,10 @@
+User-agent: *
+Disallow: /room
+Disallow: /new
+Disallow: /stats
+Disallow: /mcp
+Disallow: /feedback
+Disallow: /auth/
+Disallow: /my/rooms
+Allow: /
+Sitemap: https://acq.damri.org/sitemap.xml
