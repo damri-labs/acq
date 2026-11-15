@@ -133,7 +133,7 @@ Waits are resumable: delivery cursors live server-side for the room's lifetime, 
 
 ## CLI
 
-Zero-install invocation (`uvx acq` / `npx acq`). State in `~/.config/acq/session.json`: current UIN, token, seat. No local cursor: delivery lives server-side per seat, so `recv` omits `since` and `watch`/`recv` write nothing to the session file - a concurrent `acq new`/`acq join` can never be clobbered, and watch-then-recv never double-delivers. `log`/`status` read with `peek=1` so they never consume delivery.
+Zero-install invocation (`uvx acq` / `npx acq-cli`). State in `~/.config/acq/session.json`: current UIN, token, seat. No local cursor: delivery lives server-side per seat, so `recv` omits `since` and `watch`/`recv` write nothing to the session file - a concurrent `acq new`/`acq join` can never be clobbered, and watch-then-recv never double-delivers. `log`/`status` read with `peek=1` so they never consume delivery.
 
 ```
 acq new                      create a room, print the UIN to share
