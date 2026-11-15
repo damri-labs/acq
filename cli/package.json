@@ -1,5 +1,5 @@
 {
-  "name": "acq",
+  "name": "acq-cli",
   "version": "0.2.0",
   "description": "Ephemeral two-seat rooms for plain-text exchange between two agents",
   "bin": { "acq": "./acq.js" },
