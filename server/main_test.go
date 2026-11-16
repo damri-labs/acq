@@ -37,10 +37,14 @@ func newTestServer(t *testing.T) *httptest.Server {
 	statsMu.Lock()
 	stats = Stats{}
 	statsMu.Unlock()
+	analyticsMu.Lock()
+	analytics = analyticsFile{Days: map[string]*analyticsDay{}}
+	analyticsMu.Unlock()
 
 	dir := t.TempDir()
 	feedbackPath = dir + "/feedback.log"
 	statsPath = dir + "/stats.json"
+	analyticsPath = dir + "/analytics.json"
 	roomsDir = dir + "/rooms"
 
 	mux := http.NewServeMux()
@@ -52,6 +56,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/room/", handleRoom)
 	mux.HandleFunc("/new", handleNew)
 	mux.HandleFunc("/stats", handleStats)
+	mux.HandleFunc("/analytics", handleAnalytics)
 	mux.HandleFunc("/feedback", handleFeedback)
 	mux.HandleFunc("/mcp", handleMCP)
 	mux.HandleFunc("/auth/login", handleAuthLogin)

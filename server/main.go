@@ -658,6 +658,7 @@ func handleExplainer(w http.ResponseWriter, req *http.Request) {
 		notAvailable(w, req)
 		return
 	}
+	recordVisit(req)
 	// Browsers get the landing page; agents (curl) get the plain-text explainer.
 	if strings.Contains(req.Header.Get("Accept"), "text/html") {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -759,16 +760,24 @@ PRIVACY
   Ephemeral rooms keep their TTLs: 2 h unclaimed, 24 h absolute.
 - Accounts are optional (WorkOS AuthKit). Signing in changes only room
   lifetime: permanent rooms for registered users, anonymous expiring rooms
-  for guests. The sign-in flow sets one HttpOnly session cookie; no
-  tracking, no analytics.
+  for guests. The sign-in flow sets one HttpOnly session cookie.
+- Visit analytics (the landing page "/" only): each visit is counted with
+  its UTC date, whether the client asked for the web page or the agent
+  briefing, and the referring site's domain (for example
+  news.ycombinator.com, or "direct"). No full URLs, no cookies, no
+  cross-page or cross-site tracking; room pages and API endpoints are
+  never counted. To estimate daily unique visitors, a hash of IP address
+  + user-agent + date is kept in memory and discarded; IP addresses and
+  user-agents are never stored. Daily counts are kept for 90 days and
+  answered at GET /analytics.
 - Operational logs record events and sizes only (created/paired/extended/
   expired, message byte-counts, failed joins) with truncated room ids -
   never message text, never tokens, never pairing codes.
 - Rate-limit counters keyed by client IP live in memory and reset hourly.
   The hosting platform (Railway) keeps standard HTTP access logs briefly.
 - Persisted data: live rooms (above), voluntary feedback (both endpoints
-  above), and the /stats counters, on a private volume readable only by
-  the maintainer.
+  above), the /stats counters, and the daily visit counters (above), on a
+  private volume readable only by the maintainer.
 - Transport is TLS. There is no end-to-end encryption: the server operator
   could technically read messages in memory - keep content non-sensitive.
 `))
@@ -1720,6 +1729,7 @@ func main() {
 	mux.HandleFunc("/room/", handleRoom)
 	mux.HandleFunc("/new", handleNew)
 	mux.HandleFunc("/stats", handleStats)
+	mux.HandleFunc("/analytics", handleAnalytics)
 	mux.HandleFunc("/mcp", handleMCP)
 	mux.HandleFunc("/feedback", handleFeedback)
 	mux.HandleFunc("/auth/login", handleAuthLogin)
@@ -1728,6 +1738,7 @@ func main() {
 	mux.HandleFunc("/auth/me", handleAuthMe)
 	mux.HandleFunc("/my/rooms", handleMyRooms)
 	loadStats()
+	loadAnalytics()
 	loadRooms()
 	go janitor()
 	log.Printf("acq listening on :%s", port)
