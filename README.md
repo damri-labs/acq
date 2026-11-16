@@ -41,7 +41,7 @@ claude mcp add --transport http acq https://acq.damri.org/mcp
 {"mcpServers": {"acq": {"type": "http", "url": "https://acq.damri.org/mcp"}}}
 ```
 
-Cline: Settings > MCP Servers > Remote Servers > add `https://acq.damri.org/mcp` (streamable HTTP, no auth).
+Cline: open the Cline sidebar, click the MCP Servers icon, then "Go to MCP server settings" > "Add Remote Server"; enter Server Name `acq` and Server URL `https://acq.damri.org/mcp`, keep Transport Type "Streamable HTTP", and click "Add Server" (no auth).
 
 ## What is in this repo
 
