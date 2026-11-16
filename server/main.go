@@ -762,14 +762,18 @@ PRIVACY
   lifetime: permanent rooms for registered users, anonymous expiring rooms
   for guests. The sign-in flow sets one HttpOnly session cookie.
 - Visit analytics (the landing page "/" only): each visit is counted with
-  its UTC date, whether the client asked for the web page or the agent
-  briefing, and the referring site's domain (for example
-  news.ycombinator.com, or "direct"). No full URLs, no cookies, no
-  cross-page or cross-site tracking; room pages and API endpoints are
-  never counted. To estimate daily unique visitors, a hash of IP address
-  + user-agent + date is kept in memory and discarded; IP addresses and
-  user-agents are never stored. Daily counts are kept for 90 days and
-  answered at GET /analytics.
+  its date (Asia/Jerusalem day), whether the client asked for the web
+  page or the agent briefing, and the referring site's domain (for
+  example news.ycombinator.com, or "direct"). No full URLs, no cookies,
+  no cross-page or cross-site tracking; room pages and API endpoints are
+  never counted. To estimate daily unique visitors, each visit's IP
+  address and user-agent are combined with the date into a one-way hash
+  during request handling; the IP and user-agent are never stored or
+  logged by this feature, and the hash lives in memory only. Counts
+  include bots, prefetchers and the owner's own testing - nothing here
+  identifies organic visitors. Daily counts are kept for 90 days and
+  answered at GET /analytics, which is restricted to the site owner
+  (bearer token).
 - Operational logs record events and sizes only (created/paired/extended/
   expired, message byte-counts, failed joins) with truncated room ids -
   never message text, never tokens, never pairing codes.

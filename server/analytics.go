@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"log"
@@ -12,15 +13,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+	_ "time/tzdata" // the container image has no zoneinfo; embed it
 )
 
 // First-party visit analytics for the landing page ("/" only), answered at
-// GET /analytics. Cookieless and deliberately minimal: per UTC day we count
+// GET /analytics to the owner alone (bearer token, see handleAnalytics).
+// Cookieless and deliberately minimal: per Asia/Jerusalem day we count
 // page loads (split into web-page vs agent-briefing requests) and referring
 // site domains (host only, never full URLs). Daily unique visitors are
-// estimated with a hash of IP + user-agent + date kept in memory and
-// discarded; IP addresses and user-agents themselves are never stored. Room
-// pages and API endpoints are never counted.
+// estimated by combining each visit's IP + user-agent + date into a one-way
+// hash during request handling; the IP and user-agent are never stored or
+// logged by this feature, and the hashes live in memory only. Room pages
+// and API endpoints are never counted.
 
 const analyticsRetentionDays = 90
 
@@ -44,6 +48,15 @@ type analyticsFile struct {
 var (
 	analyticsMu sync.Mutex
 	analytics   = analyticsFile{Days: map[string]*analyticsDay{}}
+
+	// analyticsLoc buckets days the way the owner reads them.
+	analyticsLoc = func() *time.Location {
+		l, err := time.LoadLocation("Asia/Jerusalem")
+		if err != nil {
+			return time.UTC
+		}
+		return l
+	}()
 
 	analyticsPath = func() string {
 		if p := os.Getenv("ANALYTICS_FILE"); p != "" {
@@ -80,7 +93,7 @@ func persistAnalyticsLocked() {
 // evictAnalyticsDaysLocked drops days beyond the retention window. Date
 // strings are UTC yyyy-mm-dd, so plain string comparison is chronological.
 func evictAnalyticsDaysLocked() {
-	cutoff := time.Now().UTC().AddDate(0, 0, -analyticsRetentionDays).Format("2006-01-02")
+	cutoff := time.Now().In(analyticsLoc).AddDate(0, 0, -analyticsRetentionDays).Format("2006-01-02")
 	for day := range analytics.Days {
 		if day < cutoff {
 			delete(analytics.Days, day)
@@ -106,7 +119,7 @@ func referrerHost(req *http.Request) string {
 // handleExplainer after the path == "/" check, so room pages, /stats, /mcp
 // and every other endpoint are never counted.
 func recordVisit(req *http.Request) {
-	day := time.Now().UTC().Format("2006-01-02")
+	day := time.Now().In(analyticsLoc).Format("2006-01-02")
 	ref := referrerHost(req)
 	h := sha256.Sum256([]byte(day + "|" + clientIP(req) + "|" + req.UserAgent()))
 	key := hex.EncodeToString(h[:16])
@@ -150,16 +163,31 @@ type analyticsDayOut struct {
 }
 
 func handleAnalytics(w http.ResponseWriter, req *http.Request) {
+	// Owner-only: disabled until ANALYTICS_TOKEN is configured, then gated
+	// by it. Unknown or wrong token answers 404 like any unknown path, so
+	// the endpoint's existence is not advertised.
+	tok := os.Getenv("ANALYTICS_TOKEN")
+	if tok == "" ||
+		subtle.ConstantTimeCompare([]byte(req.Header.Get("Authorization")), []byte("Bearer "+tok)) != 1 {
+		notAvailable(w, req)
+		return
+	}
 	analyticsMu.Lock()
 	days := make([]analyticsDayOut, 0, len(analytics.Days))
 	for date, d := range analytics.Days {
+		// Deep-copy: recordVisit writes these maps concurrently, and the
+		// JSON encoding happens after the lock is released.
+		refs := make(map[string]int, len(d.Referrers))
+		for k, v := range d.Referrers {
+			refs[k] = v
+		}
 		days = append(days, analyticsDayOut{
 			Date:           date,
 			PageLoads:      d.PageLoads,
 			Web:            d.Web,
 			Agent:          d.Agent,
 			UniqueVisitors: d.UniqueVisitors,
-			Referrers:      d.Referrers,
+			Referrers:      refs,
 		})
 	}
 	started := analytics.StartedAt
@@ -168,11 +196,14 @@ func handleAnalytics(w http.ResponseWriter, req *http.Request) {
 	jsonOut(w, http.StatusOK, map[string]any{
 		"started_at":     started,
 		"retention_days": analyticsRetentionDays,
-		"note": "Visits to the landing page (/) only, counted per UTC day: page loads " +
+		"note": "Visits to the landing page (/) only, counted per Asia/Jerusalem day: page loads " +
 			"(web page vs agent briefing) and referring site domains (host only, never full URLs). " +
-			"unique_visitors is a same-day estimate from an in-memory hash of IP + user-agent + " +
-			"date; IPs and user-agents are never stored, and a redeploy may re-count that day's " +
-			"earlier visitors. Room pages and API endpoints are never counted.",
+			"unique_visitors is a rough same-day estimate: each visit's IP and user-agent are " +
+			"combined with the date into a one-way hash during request handling and never stored; " +
+			"the hash lives in memory and is discarded, so a redeploy may re-count that day's " +
+			"earlier visitors, and the IP comes from proxy headers a client can spoof. Counts " +
+			"include bots, prefetchers and the owner's own test traffic - nothing here identifies " +
+			"organic visitors. Room pages and API endpoints are never counted.",
 		"days": days,
 	})
 }

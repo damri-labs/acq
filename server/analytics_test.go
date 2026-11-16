@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // getLanding issues a GET to "/" with the given headers and returns the status.
@@ -34,23 +35,67 @@ func getLanding(t *testing.T, base, accept, referer, xff, ua string) int {
 	return res.StatusCode
 }
 
-func fetchAnalytics(t *testing.T, base string) map[string]any {
+func fetchAnalytics(t *testing.T, base string) (int, map[string]any) {
 	t.Helper()
-	res, err := http.Get(base + "/analytics")
+	t.Setenv("ANALYTICS_TOKEN", "test-token")
+	req, _ := http.NewRequest("GET", base+"/analytics", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /analytics: %v", err)
 	}
 	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return res.StatusCode, nil
+	}
 	var out map[string]any
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
 		t.Fatalf("decode /analytics: %v", err)
 	}
-	return out
+	return res.StatusCode, out
+}
+
+// TestAnalyticsOwnerOnly: without ANALYTICS_TOKEN configured the endpoint
+// answers 404 like any unknown path; a wrong token gets the same; only the
+// configured bearer token opens it.
+func TestAnalyticsOwnerOnly(t *testing.T) {
+	setAuthEnv(t, "")
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	get := func(auth string) int {
+		req, _ := http.NewRequest("GET", srv.URL+"/analytics", nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /analytics: %v", err)
+		}
+		defer res.Body.Close()
+		io.Copy(io.Discard, res.Body)
+		return res.StatusCode
+	}
+
+	t.Setenv("ANALYTICS_TOKEN", "")
+	if code := get(""); code != http.StatusNotFound {
+		t.Fatalf("unset token: expected 404, got %d", code)
+	}
+	t.Setenv("ANALYTICS_TOKEN", "test-token")
+	if code := get(""); code != http.StatusNotFound {
+		t.Fatalf("no header: expected 404, got %d", code)
+	}
+	if code := get("Bearer wrong"); code != http.StatusNotFound {
+		t.Fatalf("wrong token: expected 404, got %d", code)
+	}
+	if code := get("Bearer test-token"); code != http.StatusOK {
+		t.Fatalf("right token: expected 200, got %d", code)
+	}
 }
 
 func analyticsDays(t *testing.T, base string) []any {
 	t.Helper()
-	out := fetchAnalytics(t, base)
+	_, out := fetchAnalytics(t, base)
 	days, ok := out["days"].([]any)
 	if !ok {
 		t.Fatalf("/analytics days missing or wrong type: %v", out)
@@ -82,6 +127,10 @@ func TestAnalyticsCountsWebVsAgent(t *testing.T) {
 	}
 	if d["unique_visitors"].(float64) != 2 {
 		t.Fatalf("expected 2 unique visitors, got %v", d["unique_visitors"])
+	}
+	wantDay := time.Now().In(analyticsLoc).Format("2006-01-02")
+	if d["date"].(string) != wantDay {
+		t.Fatalf("day bucket %v, want Asia/Jerusalem day %s", d["date"], wantDay)
 	}
 }
 
@@ -218,7 +267,7 @@ func TestAnalyticsEndpointShape(t *testing.T) {
 
 	getLanding(t, srv.URL, "text/html", "", "1.2.3.4", "a")
 
-	out := fetchAnalytics(t, srv.URL)
+	_, out := fetchAnalytics(t, srv.URL)
 	for _, k := range []string{"started_at", "retention_days", "note", "days"} {
 		if _, ok := out[k]; !ok {
 			t.Fatalf("/analytics missing %q: %v", k, out)
@@ -226,5 +275,47 @@ func TestAnalyticsEndpointShape(t *testing.T) {
 	}
 	if out["retention_days"].(float64) != analyticsRetentionDays {
 		t.Fatalf("retention_days: %v", out["retention_days"])
+	}
+}
+
+// TestAnalyticsConcurrentVisitAndRead: hammer recordVisit and handleAnalytics
+// together; run with -race. Regression for the shallow-copy data race where
+// the handler encoded a live Referrers map after releasing the lock.
+func TestAnalyticsConcurrentVisitAndRead(t *testing.T) {
+	setAuthEnv(t, "")
+	srv := newTestServer(t)
+	defer srv.Close()
+	t.Setenv("ANALYTICS_TOKEN", "test-token")
+
+	done := make(chan struct{})
+	for w := 0; w < 4; w++ {
+		go func(n int) {
+			for i := 0; i < 50; i++ {
+				req, _ := http.NewRequest("GET", srv.URL+"/", nil)
+				req.Header.Set("Referer", "https://example-"+string(rune('a'+n))+".com/x")
+				if res, err := http.DefaultClient.Do(req); err == nil {
+					res.Body.Close()
+				}
+			}
+			done <- struct{}{}
+		}(w)
+	}
+	for r := 0; r < 2; r++ {
+		go func() {
+			for i := 0; i < 50; i++ {
+				req, _ := http.NewRequest("GET", srv.URL+"/analytics", nil)
+				req.Header.Set("Authorization", "Bearer test-token")
+				res, err := http.DefaultClient.Do(req)
+				if err == nil {
+					var out map[string]any
+					json.NewDecoder(res.Body).Decode(&out)
+					res.Body.Close()
+				}
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < 6; i++ {
+		<-done
 	}
 }
