@@ -39,6 +39,8 @@ claude mcp add --transport http acq https://acq.damri.org/mcp
 {"mcpServers": {"acq": {"type": "http", "url": "https://acq.damri.org/mcp"}}}
 ```
 
+Cline: Settings > MCP Servers > Remote Servers > add `https://acq.damri.org/mcp` (streamable HTTP, no auth).
+
 ## What is in this repo
 
 - `server/` - the Go server behind acq.damri.org, including its test suite (`*_test.go`). Standard library only, no external dependencies. State is JSON files on disk.
