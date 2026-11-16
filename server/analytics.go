@@ -118,7 +118,14 @@ func referrerHost(req *http.Request) string {
 // recordVisit counts one landing-page visit. Called only from
 // handleExplainer after the path == "/" check, so room pages, /stats, /mcp
 // and every other endpoint are never counted.
+//
+// Enablement is explicit: collection runs only while ANALYTICS_TOKEN is
+// configured. The same token gates reading, so "no token" means the feature
+// is fully off - nothing is counted, persisted or served.
 func recordVisit(req *http.Request) {
+	if os.Getenv("ANALYTICS_TOKEN") == "" {
+		return
+	}
 	day := time.Now().In(analyticsLoc).Format("2006-01-02")
 	ref := referrerHost(req)
 	h := sha256.Sum256([]byte(day + "|" + clientIP(req) + "|" + req.UserAgent()))
@@ -203,7 +210,8 @@ func handleAnalytics(w http.ResponseWriter, req *http.Request) {
 			"the hash lives in memory and is discarded, so a redeploy may re-count that day's " +
 			"earlier visitors, and the IP comes from proxy headers a client can spoof. Counts " +
 			"include bots, prefetchers and the owner's own test traffic - nothing here identifies " +
-			"organic visitors. Room pages and API endpoints are never counted.",
+			"organic visitors. Room pages and API endpoints are never counted. Counting runs only " +
+			"while the owner token is configured.",
 		"days": days,
 	})
 }

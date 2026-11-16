@@ -41,6 +41,8 @@ func newTestServer(t *testing.T) *httptest.Server {
 	analytics = analyticsFile{Days: map[string]*analyticsDay{}}
 	analyticsMu.Unlock()
 
+	t.Setenv("ANALYTICS_TOKEN", "test-token")
+
 	dir := t.TempDir()
 	feedbackPath = dir + "/feedback.log"
 	statsPath = dir + "/stats.json"

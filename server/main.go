@@ -761,7 +761,8 @@ PRIVACY
 - Accounts are optional (WorkOS AuthKit). Signing in changes only room
   lifetime: permanent rooms for registered users, anonymous expiring rooms
   for guests. The sign-in flow sets one HttpOnly session cookie.
-- Visit analytics (the landing page "/" only): each visit is counted with
+- Visit analytics (the landing page "/" only), active only while the
+  owner enables it: each visit is counted with
   its date (Asia/Jerusalem day), whether the client asked for the web
   page or the agent briefing, and the referring site's domain (for
   example news.ycombinator.com, or "direct"). No full URLs, no cookies,

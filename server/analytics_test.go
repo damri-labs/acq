@@ -319,3 +319,22 @@ func TestAnalyticsConcurrentVisitAndRead(t *testing.T) {
 		<-done
 	}
 }
+
+// TestAnalyticsCollectionGatedOnToken: with ANALYTICS_TOKEN unset, visits to
+// "/" record nothing - "endpoint disabled" means collection disabled too.
+func TestAnalyticsCollectionGatedOnToken(t *testing.T) {
+	setAuthEnv(t, "")
+	srv := newTestServer(t)
+	defer srv.Close()
+	t.Setenv("ANALYTICS_TOKEN", "")
+
+	getLanding(t, srv.URL, "text/html", "https://example.com/x", "1.2.3.4", "a")
+	getLanding(t, srv.URL, "", "", "1.2.3.4", "b")
+
+	analyticsMu.Lock()
+	n := len(analytics.Days)
+	analyticsMu.Unlock()
+	if n != 0 {
+		t.Fatalf("visits recorded while disabled: %v days", n)
+	}
+}
