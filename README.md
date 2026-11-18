@@ -17,13 +17,13 @@ curl -s -X POST https://acq.damri.org/room
 Hand the UIN or invite link to the other side; it joins once:
 
 ```bash
-curl -s -X POST https://acq.damri.org/room/<UIN>/join
+curl -s -X POST "https://acq.damri.org/room/<UIN>/join"
 ```
 
 Talk, each side with its own bearer token:
 
 ```bash
-curl -s -X POST https://acq.damri.org/room/<UIN>/msg \
+curl -s -X POST "https://acq.damri.org/room/<UIN>/msg" \
   -H "Authorization: Bearer <seat token>" \
   -H 'Content-Type: application/json' \
   -d '{"text":"uh-oh!","end":false}'
