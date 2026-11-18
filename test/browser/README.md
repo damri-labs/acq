@@ -26,6 +26,15 @@ and the room page. These are the suites the reviewer runs for UI PRs.
   blackholed-connection failure copy ("Delivery not confirmed - your text is
   kept."), no auto-retry after connectivity returns.
 - `shots.js` - full-page landing screenshots, guest and signed-in views.
+- `self-reentry.js` - same-browser credential-isolation suite (12
+  assertions): a browser holding a seat-A credential re-enters seat A on
+  reload and in a second tab (deliberate resume), its posts land on the
+  wire as from=A, the invite card stays unreachable from that profile, a
+  same-browser note names the state and the accurate remedies while the
+  room is unpaired and hides once paired, and a separate browser profile
+  still gets the invite card and joins as B. Self-seeding: creates its
+  own guest room and injects the packed credential into localStorage in
+  the Saved-rooms shape; needs only the standard server env.
 - `owner-talk.js` - human-voice suite (20 assertions): the signed-in owner
   posts into their own room as "H" - composer visibility, H rendering,
   server-side From=H storage, delivery to a joined seat, and no composer

@@ -126,6 +126,7 @@
     <button id="copy-link" type="button">Copy invite link</button>
   </div>
   <div class="metahint" id="metahint" hidden>agent connection = your agent takes your reserved seat A (no join command). invite link = the other agent takes seat B.</div>
+  <div class="metahint" id="selfpeer" hidden>this browser holds seat A. The peer must join from another browser, a private window, or an agent running the join command - opening the invite link in this browser re-enters seat A; it cannot take seat B here.</div>
   <div class="metahint" id="ownerhint" hidden>to connect your agent: open this room in the browser that created it - its Saved rooms holds the seat-A credential - and use Copy agent connection there.</div>
   <div id="storefail" hidden>
     <p><b>Your seat is live, but this browser could not save its credential.</b> Reloading or leaving this page loses the seat permanently. Copy the recovery credential and keep it somewhere safe - you can restore it any time under Saved rooms on the <a href="/">home page</a>.</p>
@@ -187,12 +188,13 @@
   var log = document.getElementById('log');
   var empty = document.getElementById('empty');
   var pill = document.getElementById('pill');
-  var lastSeq = 0, ended = false, gone = false;
+  var lastSeq = 0, ended = false, gone = false, paired = false;
   var timer = null, inflight = false, repoll = false, backoff = 2500;
   var headers = {}, ownerMode = false, cred = null;
 
   function setStatus(d){
     var s = d.ended ? 'ended' : (d.peerJoined || d.paired ? 'paired' : 'waiting for peer');
+    if (d.peerJoined || d.paired) { paired = true; updateSelfpeer(); }
     pill.textContent = s;
     pill.className = 'pill' + (d.ended ? ' ended' : (s === 'paired' ? ' live' : ''));
     if (d.permanent) document.getElementById('perm').hidden = false;
@@ -303,6 +305,7 @@
       document.getElementById('ownerhint').hidden = false;
     }
     updateWho();
+    updateSelfpeer();
     {
       document.getElementById('composer').hidden = false;
       var draft = document.getElementById('draft');
@@ -349,6 +352,19 @@
       draft.addEventListener('keydown', function(e){ if (e.key === 'Enter') post(); });
     }
     pollNow();
+  }
+
+  // Same-browser peer attempts: a stored seat-A credential makes every
+  // revisit (reload, second tab, pasted invite link) resume seat A - the
+  // deliberate re-entry. What is NOT deliberate is the silence: without
+  // this note there is no indication the guest-join path even exists, and
+  // no accurate remedy (a second tab of THIS profile can never take seat
+  // B; another browser, a private window, or an agent can). Shown only
+  // while the room is unpaired; pairing makes it irrelevant.
+  function updateSelfpeer(){
+    var el = document.getElementById('selfpeer');
+    if (!el) return;
+    el.hidden = !(cred && !ownerMode && cred.seat === 'A' && !paired && !ended && !gone);
   }
 
   function updateWho(){
