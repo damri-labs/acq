@@ -974,6 +974,16 @@ func seatFor(r *Room, req *http.Request) string {
 	return ""
 }
 
+// Informational next-step hints on gone-room responses (SPEC.md: optional,
+// not part of the machine contract). The anonymous variant omits the
+// transcript-readability note: join/rejoin and the tombstone router answer
+// callers who may hold only a UIN, and readability is a seat-holder fact.
+const (
+	nextEndedAnon = "This room has ended. POST /room opens a fresh room."
+	nextEndedSeat = "This room has ended. Its transcript stays readable until the room expires. POST /room opens a fresh room."
+	nextExpired   = "This room has expired and its messages were deleted. POST /room opens a fresh room."
+)
+
 func handleJoin(w http.ResponseWriter, req *http.Request, r *Room) {
 	// Optional self-declared participant kind: {"as":"human"} marks seat B
 	// for display only - it changes no authorization, seat semantics, or
@@ -998,7 +1008,7 @@ func handleJoin(w http.ResponseWriter, req *http.Request, r *Room) {
 	if r.ended {
 		r.mu.Unlock()
 		log.Printf("join_failed uin=%s... reason=ended", r.id[:4])
-		jsonOut(w, http.StatusGone, map[string]string{"detail": "room ended"})
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room ended", "next": nextEndedAnon})
 		return
 	}
 	r.pairedAt = time.Now()
@@ -1055,7 +1065,7 @@ func handleRejoin(w http.ResponseWriter, req *http.Request, r *Room) {
 	r.mu.Lock()
 	if r.ended {
 		r.mu.Unlock()
-		jsonOut(w, http.StatusGone, map[string]string{"detail": "room ended"})
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room ended", "next": nextEndedAnon})
 		return
 	}
 	if seat == "B" && r.pairedAt.IsZero() {
@@ -1178,7 +1188,7 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.ended {
-		jsonOut(w, http.StatusGone, map[string]string{"detail": "room ended"})
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room ended", "next": nextEndedSeat})
 		return
 	}
 	if len(r.msgs) >= maxMsgsPerRoom {
@@ -1259,6 +1269,9 @@ func serveTranscript(w http.ResponseWriter, req *http.Request, r *Room, ownerVie
 	if perm {
 		resp["permanent"] = true
 	}
+	if ended {
+		resp["next"] = nextEndedSeat
+	}
 	jsonOut(w, http.StatusOK, resp)
 }
 
@@ -1302,7 +1315,7 @@ func handleRecv(w http.ResponseWriter, req *http.Request, r *Room, seat string) 
 		r.mu.Lock()
 		if r.expired(time.Now()) {
 			r.mu.Unlock()
-			jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired"})
+			jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
 			return
 		}
 		var out []Msg
@@ -1358,6 +1371,9 @@ func handleRecv(w http.ResponseWriter, req *http.Request, r *Room, seat string) 
 			}
 			if !peerRekey.IsZero() {
 				resp["peerRekeyedAt"] = peerRekey.Unix()
+			}
+			if ended {
+				resp["next"] = nextEndedSeat
 			}
 			jsonOut(w, http.StatusOK, resp)
 			return
@@ -1514,7 +1530,7 @@ func handleRoom(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			if isTombstoned(uin) {
-				jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired"})
+				jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
 				return
 			}
 			notAvailable(w, req)
@@ -1554,7 +1570,7 @@ func handleRoom(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		if isTombstoned(uin) {
-			jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired"})
+			jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
 			return
 		}
 		notAvailable(w, req)
