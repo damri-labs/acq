@@ -53,6 +53,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/", handleExplainer)
 	mux.HandleFunc("/robots.txt", handleRobots)
 	mux.HandleFunc("/sitemap.xml", handleSitemap)
+	mux.HandleFunc("/llms.txt", handleLlmsTxt)
 	mux.HandleFunc("/og-card.png", handleOGCard)
 	mux.HandleFunc("/room", handleCreate)
 	mux.HandleFunc("/room/", handleRoom)

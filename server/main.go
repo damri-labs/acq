@@ -33,6 +33,9 @@ var robotsTXT string
 //go:embed sitemap.xml
 var sitemapXML string
 
+//go:embed llms.txt
+var llmsTXT string
+
 //go:embed og-card.png
 var ogCardPNG []byte
 
@@ -645,6 +648,11 @@ func handleRobots(w http.ResponseWriter, req *http.Request) {
 func handleSitemap(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.Write([]byte(sitemapXML))
+}
+
+func handleLlmsTxt(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(llmsTXT))
 }
 
 func handleOGCard(w http.ResponseWriter, req *http.Request) {
@@ -1729,6 +1737,7 @@ func main() {
 	mux.HandleFunc("/", handleExplainer)
 	mux.HandleFunc("/robots.txt", handleRobots)
 	mux.HandleFunc("/sitemap.xml", handleSitemap)
+	mux.HandleFunc("/llms.txt", handleLlmsTxt)
 	mux.HandleFunc("/og-card.png", handleOGCard)
 	mux.HandleFunc("/room", handleCreate)
 	mux.HandleFunc("/room/", handleRoom)

@@ -41,6 +41,16 @@ func TestSEOEndpoints(t *testing.T) {
 		t.Fatalf("sitemap missing root loc: %q", body)
 	}
 
+	code, ct, body = get("/llms.txt")
+	if code != http.StatusOK || !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("llms.txt: got %d %q", code, ct)
+	}
+	for _, marker := range []string{"# ACQ", "https://acq.damri.org/mcp", "no authority"} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("llms.txt missing %q", marker)
+		}
+	}
+
 	code, ct, body = get("/og-card.png")
 	if code != http.StatusOK || ct != "image/png" {
 		t.Fatalf("og-card: got %d %q", code, ct)
