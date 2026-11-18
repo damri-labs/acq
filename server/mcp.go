@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +20,28 @@ func handleMCP(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		notAvailable(w, req)
 		return
+	}
+	// CSRF / cross-origin hardening, same threat model as handleOwnerSend.
+	// A browser "simple request" cannot use Content-Type: application/json,
+	// and this server answers no CORS preflight, so requiring it keeps
+	// cross-origin pages from invoking anonymous methods under a visitor's
+	// browser. Native MCP clients already send it per spec. When an Origin
+	// header is present it must be strictly same-origin (exact host, scheme
+	// per trustedScheme - safe to trust X-Forwarded-Proto here because the
+	// check only ever restricts, and a browser cannot set that header
+	// without the preflight this server never answers); native clients send
+	// no Origin and pass.
+	mt, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	if err != nil || mt != "application/json" {
+		jsonOut(w, http.StatusUnsupportedMediaType, map[string]string{"detail": "POST with Content-Type: application/json"})
+		return
+	}
+	if o := req.Header.Get("Origin"); o != "" {
+		u, err := url.Parse(o)
+		if err != nil || u.Scheme != trustedScheme(req) || !strings.EqualFold(u.Host, req.Host) {
+			notAvailable(w, req)
+			return
+		}
 	}
 	var rpc struct {
 		JSONRPC string          `json:"jsonrpc"`
