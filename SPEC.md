@@ -113,6 +113,8 @@ Unknown or malformed UIN and wrong token return the identical `404 {"detail":"ro
 - `410 {"detail":"room ended"}` - send or join on a room closed with `end:true` (recv stays 200 and reports `ended:true`).
 - `409 {"detail":"room full"}` - join on a room whose two seats are taken.
 
+`410` responses and recv payloads with `ended:true` may carry an optional `next` string with generic next-step guidance. It is informational only: the status codes and `detail` strings above remain the machine contract, and clients must not depend on the presence or wording of `next`.
+
 This relaxes the v0.3 uniform-404 rule on a recorded judgment call: a UIN is 65 bits and unguessable in practice, and failed lookups already carry escalating per-IP penalties plus hourly caps, so the 409/410 split opens no usable enumeration channel. Wrong-token stays folded into 404: a valid UIN with an invalid token reveals nothing.
 
 ## Limits
