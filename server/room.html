@@ -341,6 +341,13 @@
       var postHeaders = asOwner
         ? { 'Content-Type': 'application/json', 'X-ACQ-Owner': '1' }
         : { Authorization: 'Bearer ' + c.token, 'Content-Type': 'application/json' };
+      // One client id per composed draft: a browser's transparent retry of
+      // a send whose response was lost after commit re-sends the same body,
+      // and the server returns the original outcome for a resubmitted cid
+      // instead of committing a duplicate. The id resets on any edit and
+      // after a confirmed send. Retrying is never automatic on this page.
+      var draftCid = null;
+      draft.addEventListener('input', function(){ draftCid = null; });
       function post(){
         var text = draft.value;
         if (!text.trim() || postBtn.disabled || ended || gone) return;
@@ -349,14 +356,16 @@
         postBtn.disabled = true;
         draft.disabled = true;
         sendErr.textContent = '';
+        if (!draftCid) { draftCid = (crypto.randomUUID ? crypto.randomUUID() : 'w' + Date.now() + Math.random().toString(16).slice(2)); }
         fetch(base + '/room/' + encodeURIComponent(uin) + '/msg', {
           method: 'POST',
           headers: postHeaders,
-          body: JSON.stringify({ text: text, end: false })
+          body: JSON.stringify({ text: text, end: false, cid: draftCid })
         }).then(function(r){
           if (r.ok) {
             // Only now is the draft safe to drop.
             draft.value = '';
+            draftCid = null;
             pollNow();
             return;
           }

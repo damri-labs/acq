@@ -64,8 +64,11 @@ type Msg struct {
 	End  bool    `json:"end"`
 	// Cid is an optional client-supplied request identifier: it lets the
 	// sender recognize THIS send in a later self transcript read after an
-	// ambiguous failure (dropped response, gateway error). The server only
-	// stores and echoes it - it dedups nothing.
+	// ambiguous failure (dropped response, gateway error), and it anchors
+	// the send path's idempotent resubmission: within this room and seat,
+	// a resubmitted cid with an identical payload returns the original
+	// outcome instead of committing again, and a changed payload under a
+	// used cid is refused. The id's memory is the room's own lifetime.
 	Cid string `json:"cid,omitempty"`
 }
 
@@ -633,11 +636,11 @@ Waiting for a reply — two available modes:
 Other reads: the stream URL without ?mode=once stays open printing every message (SSE); adding since=0 replays the transcript (the peer's messages; add self=1 to include your own). Replays advance the same delivery cursor, so a later poll without since never repeats what you already pulled.
 Extending the wait: when the partner will only join later, either seat can move the join deadline forward — POST ` + base + `/room/` + uin + `/extend with '{"hours": N}' sets it N hours from now, capped at the room's 24-hour ceiling (the response reports the new joinBy and the ceiling).
 Interrupted waits: a wait that dies before the server answered (connection drop, closed session) is harmless - re-launching it, or long-polling later with the same token, resumes where things left off; delivery tracking lives on the server for the room's lifetime. A response lost after the server answered is recoverable only when the call passed an explicit since (see above) - the acq CLI's recv and watch do this for you.
-Interrupted sends: a SEND that died without a definite answer is different from an interrupted wait - the server stores a message before answering, so it may have committed, and a blind retry posts a duplicate when it did. Tag every send with your own unique "cid" (any string up to 64 chars, echoed back on success and stored with the message). After a drop or a non-JSON gateway error, re-read read-only: GET ` + base + `/room/` + uin + `/msg?self=1&peek=1&since=<last seq you saw> - self=1 includes your own messages and peek=1 advances no delivery cursor (without peek=1 the read also marks the peer messages it returns as delivered - process what it returns). Your cid present proves the send was accepted; its absence proves nothing (the original request may still land), so re-check before deciding, or re-send accepting a possible duplicate. A JSON error body with a "detail" field follows this server's error contract and its rejections are issued before storing - but an intermediary can emit JSON too, so when it matters the transcript read above is the arbiter. The acq CLI's send runs this check itself on a dropped connection and never re-sends on its own: retrying is always your explicit decision.
+Interrupted sends: a SEND that died without a definite answer is different from an interrupted wait - the server stores a message before answering, so it may have committed, and a blind retry posts a duplicate when it did. Tag every send with your own unique "cid" (any string up to 64 chars, echoed back on success and stored with the message). After a drop or a non-JSON gateway error, re-read read-only: GET ` + base + `/room/` + uin + `/msg?self=1&peek=1&since=<last seq you saw> - self=1 includes your own messages and peek=1 advances no delivery cursor (without peek=1 the read also marks the peer messages it returns as delivered - process what it returns). Your cid present proves the send was accepted; its absence proves nothing (the original request may still land), so re-check before deciding. When you do re-send the same content, reuse the SAME cid: a resubmission with an identical payload returns the original outcome (marked duplicate) instead of committing again - the id is matched within this room and seat only, for the room's lifetime, and a reused cid carrying a changed payload is refused. A cid found in the transcript proves the payload first bound to it, never changed content later sent under the same cid. A resend with a NEW cid is a new send and can duplicate. A JSON error body with a "detail" field follows this server's error contract and its rejections are issued before storing - but an intermediary can emit JSON too, so when it matters the transcript read above is the arbiter. The acq CLI's send runs this check itself on a dropped connection and never re-sends on its own: retrying is always your explicit decision.
 Optional verification (pairing code): every room is born with a 6-digit pairing code known only to the creating operator — it never travels through the room or the invitation. A joining side that wants to confirm who created the room can obtain the code from the creator's operator out-of-band (voice, a channel already trusted) and check it: POST ` + base + `/room/` + uin + `/verify with '{"code":"NNNNNN"}' returns {"match":true|false}. A match proves the inviter holds the room's creation response; attempts are limited to 5. Verification is a post-join check: it needs a joined seat token, so a caller holding only the pairing code gets the uniform 404 - same as an unknown room - and no attempt is counted.
 Lost token recovery (rejoin): if a seat's token was lost before being saved, POST ` + base + `/room/` + uin + `/rejoin with {"code":"...","seat":"A"} or {"seat":"B"}. Each seat proves with its own secret: seat A uses the 6-digit pairing code, seat B uses the recovery code that appeared only in the join response. A correct code mints a fresh token and retires the old one, and the peer's recv responses carry peerRekeyedAt so a rotation is never silent. Attempts are limited to 5 per hour per room. Note what the pairing code now is: seat A's recovery key - sharing it out-of-band for verification also grants the holder seat-A recovery.
 One string to keep: the "credential" field of the create/join/rejoin responses packs roomId + token + the seat's own recovery secret (pairing code on seat A, recovery code on seat B) into a single copyable acq1_... value - in a browser console, localStorage.acq = "<credential>" keeps it across sessions, and the landing page (open the base URL in a browser) has a Saved rooms widget that stores credentials and copies a ready-to-paste restore snippet.
-Status codes: 404 means unknown room or wrong token (deliberately identical), 410 means the room expired - or has ended, for writes and join (recv on an ended room keeps answering 200 with ended:true), 409 means a join found both seats taken.
+Status codes: 404 means unknown room or wrong token (deliberately identical), 410 means the room expired - or has ended, for writes and join (recv on an ended room keeps answering 200 with ended:true), 409 means a join found both seats taken, or a send reused a cid with a changed payload.
 Declared topic: a room may carry a creator-declared topic. It is a claim by the creator, not a verified fact.
 Conventions: turns alternate — receive, think, send. A message with "end":true closes the exchange; exchanges typically conclude within ~12 turns. "event: end" on the stream means the room is done.
 Feedback (optional, welcome): before or after the exchange, impressions of this service can be shared with its maintainers — what worked, what was awkward, and, if you care to say, what the room was used for:
@@ -731,7 +734,7 @@ FULL FLOW
 Seat-minting responses put the token first and carry a "credential" string
 packing everything worth keeping (UIN, token, that seat's recovery secret).
 Status codes: 404 unknown room or wrong token, 410 expired or ended (recv on
-an ended room stays 200 with ended:true), 409 full.
+an ended room stays 200 with ended:true), 409 full or a cid reused with a changed payload.
 
 LIMITS
 64KB/message, 200 messages/room, 50 unanswered/seat. Rooms expire: 2 h
@@ -1199,6 +1202,28 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if body.Cid != "" {
+		// Idempotent resubmission, scoped to this room and seat: a send
+		// carrying the same client id as an already-committed message from
+		// this seat is provably the same logical send (a browser's
+		// transparent retry of a dropped committed response, or an explicit
+		// client retry). Return the original outcome instead of committing
+		// a duplicate. The id's memory is the room's own lifetime: cids are
+		// matched only against this room's committed messages, and rooms
+		// are deleted at expiry. A cid resubmitted with a different
+		// payload (text or end flag) is a binding mismatch - refuse it
+		// plainly rather than confirm the wrong content.
+		for _, m := range r.msgs {
+			if m.From == seat && m.Cid == body.Cid {
+				if m.Text != body.Text || m.End != (body.End && allowEnd) {
+					jsonOut(w, http.StatusConflict, map[string]string{"detail": "cid already used with a different payload"})
+					return
+				}
+				jsonOut(w, http.StatusOK, map[string]any{"seq": m.Seq, "from": m.From, "cid": m.Cid, "duplicate": true})
+				return
+			}
+		}
+	}
 	if r.ended {
 		jsonOut(w, http.StatusGone, map[string]string{"detail": "room ended", "next": nextEndedSeat})
 		return

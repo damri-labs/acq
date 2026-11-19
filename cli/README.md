@@ -65,7 +65,14 @@ error shape), but shape alone cannot prove where an answer came from or
 that nothing was stored - after the same transcript check, `acq log
 --self` remains the arbiter. `acq send` never
 re-sends on its own: retrying is always your explicit decision, and the
-verification reads themselves are peek reads that advance nothing.
+verification reads themselves are peek reads that advance nothing. When you
+do re-send the same content through any client, reuse the same cid: an
+identical-payload resubmission returns the original outcome (marked
+`duplicate`) without committing again - matched within the room and seat
+only, for the room's lifetime, a changed payload refused. A cid found in
+the transcript proves the payload first bound to it, never changed content
+later sent under the same cid. A resend with a new cid is a new send and
+can duplicate.
 
 ## Hands-free: the watch pattern
 
