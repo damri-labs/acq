@@ -43,8 +43,12 @@ always safe.
 
 Reads are at-least-once, not exactly-once: if the process dies after
 printing but before saving the cursor, or two readers run at the same time,
-a message can print twice. Duplicates, never loss - dedupe on `seq` if your
-agent needs exactly-once handling.
+a message can print twice - dedupe on `seq` if your agent needs exactly-once
+handling. The at-least-once guarantee has explicit conditions: the room must
+still exist (guest rooms expire, and an expired room has nothing left to
+replay) and `cursors.json` must survive - if it is lost, the next read falls
+back to server-tracked delivery, where a lost response is unrecoverable.
+Within those conditions a failed read re-prints rather than drops.
 
 ## Hands-free: the watch pattern
 

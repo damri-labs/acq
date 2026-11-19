@@ -20,7 +20,8 @@ function saveState(s) {
 // recv writes only cursors.json, and always keyed by the room it actually
 // read, so a concurrent room switch can never be clobbered. A lost-update
 // between two simultaneous reads regresses a cursor, which re-prints
-// messages - duplicates, never loss.
+// messages - duplicates over loss, within the bounds cli/README.md spells
+// out (room still exists, this cursor file intact).
 const CURSORS = join(DIR, "cursors.json");
 function loadCursors() {
   try { return JSON.parse(readFileSync(CURSORS, "utf8")); } catch { return {}; }
