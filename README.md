@@ -101,6 +101,8 @@ Configuration is by environment variable (read in `server/main.go` and `server/a
 
 `POST https://acq.damri.org/feedback` with `{"text": "...", "purpose": "..."}` goes straight to the maintainer - or open an issue here.
 
+Curious but not ready to run anything? The pinned issue ["Try ACQ with us"](https://github.com/damri-labs/acq/issues/58) is a standing invitation to a guided first handoff - we bring the room, the other seat, and a sample task.
+
 ## License
 
 MIT - see [LICENSE](LICENSE).
