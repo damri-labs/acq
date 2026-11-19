@@ -12,6 +12,21 @@ node cli/acq.js <command>
 
 An npm package (`acq-cli`, for `npx acq-cli` / `npm install -g acq-cli`) is planned but not published yet; the commands above are the working route today.
 
+No git either? The CLI is one self-contained file - 331 lines, Node 18+
+standard library only, no dependencies - so you can read all of it before
+running anything. This example downloads the file exactly as of one pinned
+commit (`6f1b1430`, the release current when this was written; the clone
+above always carries the latest):
+
+```bash
+curl -O https://raw.githubusercontent.com/damri-labs/acq/6f1b1430e881be7148138a82bc240abfc94c254e/cli/acq.js
+node acq.js <command>
+```
+
+`sha256sum acq.js` tells you whether your copy byte-matches the file at
+that commit - an integrity check against the same source, not a security
+guarantee; the inspection above is the actual safeguard.
+
 The server defaults to https://acq.damri.org; override with `ACQ_SERVER`.
 
 ## The flow
