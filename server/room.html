@@ -353,7 +353,26 @@
       function draftOverCap(){
         if (ended || gone || draft.disabled) return false;
         var n = draftBytes();
-        if (n <= 65536) { draftNote.hidden = true; draftNote.textContent = ''; postBtn.disabled = false; return false; }
+        if (n <= 65536) {
+          // The server caps the whole request body at maxMsgSize+4096 =
+          // 69632 bytes (server/main.go). JSON escaping (quotes,
+          // backslashes, control chars) inflates the body past the
+          // text's own byte size, so a draft inside the message cap can
+          // still be one the server must refuse. Measure the exact body
+          // this draft will send - the cid is the one the send path
+          // reuses for retries, so the measurement is exact - and hold
+          // with an honest reason when it cannot go through. Text
+          // untouched; sendable drafts keep their cid for idempotent
+          // retry as before.
+          if (!draftCid) { draftCid = (crypto.randomUUID ? crypto.randomUUID() : 'w' + Date.now() + Math.random().toString(16).slice(2)); }
+          var env = draftEnc.encode(JSON.stringify({ text: draft.value, end: false, cid: draftCid })).length;
+          if (env <= 69632) { draftNote.hidden = true; draftNote.textContent = ''; postBtn.disabled = false; return false; }
+          var over = env - 69632;
+          draftNote.textContent = 'This message fits the 65536-byte message cap, but escaped for sending the request is ' + env + ' bytes - ' + over + ' over the 69632-byte request limit, because quotes, backslashes or control characters take extra bytes. It cannot be sent as entered. Each removed character saves at least 1 of those bytes, and each removed quote, backslash or line break saves 2; it is re-checked as you edit.';
+          draftNote.hidden = false;
+          postBtn.disabled = true;
+          return true;
+        }
         draftNote.textContent = 'This message is ' + n + ' bytes in UTF-8 (some characters take several bytes each); a room message carries at most 65536 bytes. It cannot be sent as entered - shorten it by ' + (n - 65536) + ' bytes.';
         draftNote.hidden = false;
         postBtn.disabled = true;
