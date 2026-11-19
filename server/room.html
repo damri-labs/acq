@@ -431,7 +431,9 @@
         });
       }
       postBtn.addEventListener('click', post);
-      draft.addEventListener('keydown', function(e){ if (e.key === 'Enter') post(); });
+      // A composition-confirming Enter (IME) is text input, not send intent:
+      // the same guard the landing topic field uses.
+      draft.addEventListener('keydown', function(e){ if (e.key === 'Enter' && !e.isComposing) post(); });
       // Deliberate end from the UI: seat-credential sessions only. The
       // owner (H) path never sees it - ending stays a seat action, same
       // as the API. Two-step inline confirm states the consequence before
