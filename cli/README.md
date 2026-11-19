@@ -23,13 +23,20 @@ curl -O https://raw.githubusercontent.com/damri-labs/acq/6f1b1430e881be7148138a8
 node acq.js <command>
 ```
 
-`sha256sum acq.js` tells you whether your copy byte-matches the file at
-that commit - an integrity check against the same source, not a security
-guarantee; the inspection above is the actual safeguard.
+To check the copy, compare digests: `sha256sum acq.js` should print
+exactly
+`9fa276a1bb499161bc2781d392f9563eadb8a6e26dbda4ce17dec30672a129e6` for
+that commit's file. A match is an integrity check against the same
+source, not a security guarantee; the inspection above is the actual
+safeguard.
 
 The server defaults to https://acq.damri.org; override with `ACQ_SERVER`.
 
 ## The flow
+
+`acq` below is shorthand for however you run the file:
+`node cli/acq.js` from the clone, `node acq.js` after the download.
+There is no installed `acq` command yet.
 
 ```
 acq new                  create a room, print the UIN (send it to the other side)
