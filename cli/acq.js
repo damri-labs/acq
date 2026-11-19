@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, renameSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -25,16 +25,36 @@ function ensureDir() {
   mkdirSync(DIR, { recursive: true, mode: 0o700 });
   tighten(DIR, 0o700);
 }
+// Writes go through a per-writer temp file + rename: a process killed
+// mid-write then leaves either the old complete file or the new one, never
+// a truncated JSON state file (POSIX rename is atomic within a filesystem).
+// The temp name carries the pid because two concurrent savers sharing one
+// fixed temp could interleave their writes and rename out mixed JSON; with
+// per-writer temps each rename publishes one complete version, last renamer
+// wins - the documented lost-update outcome (a regressed cursor re-prints),
+// never a blended file.
 function writePrivate(file, data) {
   ensureDir();
-  writeFileSync(file, data, { mode: 0o600 });
-  chmodSync(file, 0o600);
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, data, { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  try {
+    renameSync(tmp, file);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+    throw e;
+  }
 }
+// A missing state file means "no session"; a CORRUPT one is different:
+// silently treating it as empty would misdirect the user (a live room
+// looking like no room) and, for cursors, would silently void replay-safety.
 function loadState() {
   let raw;
-  try { raw = readFileSync(FILE, "utf8"); } catch { return {}; }
+  try { raw = readFileSync(FILE, "utf8"); }
+  catch (e) { if (e.code === "ENOENT") return {}; throw e; }
   tighten(DIR, 0o700); tighten(FILE, 0o600);
-  try { return JSON.parse(raw); } catch { return {}; }
+  try { return JSON.parse(raw); }
+  catch { throw new Error(`corrupt state file ${FILE}: refusing to proceed on a guess; inspect it, or remove it and run acq new/join again`); }
 }
 function saveState(s) {
   writePrivate(FILE, JSON.stringify(s, null, 2));
@@ -50,9 +70,14 @@ function saveState(s) {
 const CURSORS = join(DIR, "cursors.json");
 function loadCursors() {
   let raw;
-  try { raw = readFileSync(CURSORS, "utf8"); } catch { return {}; }
+  try { raw = readFileSync(CURSORS, "utf8"); }
+  catch (e) { if (e.code === "ENOENT") return {}; throw e; }
   tighten(DIR, 0o700); tighten(CURSORS, 0o600);
-  try { return JSON.parse(raw); } catch { return {}; }
+  // A corrupt cursor file must not silently reset every cursor to
+  // server-tracked reads: messages whose response was already generated but
+  // lost would then be unrecoverable. Fail visibly instead.
+  try { return JSON.parse(raw); }
+  catch { throw new Error(`corrupt state file ${CURSORS}: saved read cursors are unreadable, so replay-safety cannot be honored; inspect it, or remove it to accept server-tracked reads (a response lost after that read is unrecoverable)`); }
 }
 function saveCursor(room, cursor) {
   const c = loadCursors();

@@ -13,10 +13,14 @@
 //  4. State is owner-only: the session file holds a live seat bearer token,
 //     so the state directory is 0700 and both files 0600 - created that way,
 //     and pre-existing loose state tightened on access (cases 11-13).
+//  5. State files are written atomically (per-writer temp + rename), and a
+//     CORRUPT state file fails visibly instead of being silently treated as
+//     empty: a silent cursor reset would void replay-safety and could turn a
+//     recoverable lost response into an unrecoverable loss (cases 14-17).
 // Run: node test-watch-session.mjs
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, statSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, statSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -357,6 +361,132 @@ function check(name, cond, extra) {
   check("corrupt cursors path: recv exits non-zero", r.code !== 0, `exit=${r.code}`);
   check("corrupt cursors path: error surfaced on stderr", r.err.length > 0, `stderr empty, out=${r.out}`);
   stub.close();
+}
+
+// Case 14: a truncated cursors.json (process killed mid-write) must NOT be
+// silently treated as "no cursors" - that reset would drop already-generated
+// but unprinted messages with no trace. recv must fail visibly, naming the
+// file, before any server read.
+{
+  const home = makeHome();
+  writeSession(home, { room: "R", token: "tok", seat: "A" });
+  writeFileSync(cursPath(home), '{"R": 5, "oth'); // truncated mid-write
+  const stub = await startStub();
+  stub.addMsg(6, "must-not-lose");
+  const r = await run(home, stub.port, ["recv", "--wait", "0"]);
+  check("corrupt cursors: recv exits non-zero", r.code !== 0, `exit=${r.code} out=${r.out}`);
+  check("corrupt cursors: error names the file and the consequence", r.err.includes("corrupt state file") && r.err.includes("cursors.json") && r.err.includes("replay-safety"), r.err);
+  check("corrupt cursors: no server read on a guessed cursor", !stub.saw("/room/R/msg"), stub.queries.join(","));
+  check("corrupt cursors: nothing printed as if healthy", !r.out.includes("[no new messages]"), r.out);
+  stub.close();
+}
+
+// Case 15: a corrupt session.json (room/seat context unreadable) fails
+// visibly instead of the silent "no active room" misdirection.
+{
+  const home = makeHome();
+  writeFileSync(sessPath(home), '{"room": "R", "to');
+  const stub = await startStub();
+  const r = await run(home, stub.port, ["watch"]);
+  check("corrupt session: watch exits non-zero", r.code !== 0, `exit=${r.code}`);
+  check("corrupt session: error names the file", r.err.includes("corrupt state file") && r.err.includes("session.json"), r.err);
+  check("corrupt session: no server contact on guessed state", stub.queries.length === 0, stub.queries.join(","));
+  stub.close();
+}
+
+// Case 16: normal saves leave valid JSON and no temp-file debris (the
+// atomic write completes the rename).
+{
+  const home = makeHome();
+  writeSession(home, { room: "R", token: "tok", seat: "A" });
+  const stub = await startStub();
+  stub.addMsg(4, "x");
+  const r = await run(home, stub.port, ["recv", "--wait", "0"]);
+  const { readdirSync } = await import("node:fs");
+  const leftovers = readdirSync(dirPath(home)).filter(f => f.endsWith(".tmp"));
+  check("atomic writes: recv works", r.code === 0, `exit=${r.code} err=${r.err}`);
+  check("atomic writes: cursors valid JSON after save", readCursors(home).R === 4, JSON.stringify(readCursors(home)));
+  check("atomic writes: no .tmp debris left behind", leftovers.length === 0, leftovers.join(","));
+  stub.close();
+}
+
+// Case 17: the exact syscall sequence of acq.js writePrivate (temp file in
+// the same directory, chmod 600, rename) is exercised by two real child
+// PROCESSES whose steps are aligned by barrier files, so the interleaving
+// is exact, not timing luck. 17a replicates the PRE-FIX shared-temp shape
+// and pins the demonstrated tear: one writer renames the shared temp while
+// the other still holds it open, and the second writer's late write lands
+// in the published file. 17b replicates the shipped per-writer-temp shape:
+// each rename publishes one complete payload, last renamer wins whole-file
+// (the documented lost-update outcome), never a blend, no debris. The real
+// CLI path is covered end-to-end by case 16; this harness exists because
+// the two-CLI-process overlap cannot be forced deterministically from the
+// command surface.
+{
+  const dir = mkdtempSync(join(tmpdir(), "acq-race-"));
+  const barrier = join(dir, "b"); mkdirSync(barrier);
+  const payload1 = JSON.stringify({ roomA: 1, pad: "x".repeat(80) });
+  const payload2 = JSON.stringify({ roomB: 2, pad: "y".repeat(400) });
+  writeFileSync(join(dir, "p1.json"), payload1);
+  writeFileSync(join(dir, "p2.json"), payload2);
+  const child = (mode, me, myTmp) => spawn(process.execPath, ["-e", `
+    const fs = require("fs");
+    const [, mode, target, myTmp, payloadFile, bdir, me] = process.argv; // node -e: argv is [execPath, ...args]
+    const payload = fs.readFileSync(payloadFile, "utf8");
+    const sig = n => fs.writeFileSync(bdir + "/" + n, "1");
+    const nap = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    const wait = n => { const t = Date.now(); while (!fs.existsSync(bdir + "/" + n)) { if (Date.now() - t > 10000) { console.error("timeout " + n); process.exit(3); } nap(5); } };
+    if (mode === "shared") {
+      if (me === "p1") {
+        const fd = fs.openSync(myTmp, "w");          // p1 opens the shared temp first
+        sig("p1-open"); wait("p2-renamed");
+        fs.writeSync(fd, payload);                    // late write lands in the published inode
+        fs.closeSync(fd);
+      } else {
+        wait("p1-open");
+        fs.writeFileSync(myTmp, payload);             // truncate + complete write
+        fs.renameSync(myTmp, target);                 // publishes the inode p1 still holds
+        sig("p2-renamed");
+      }
+    } else {
+      if (me === "p1") {
+        fs.writeFileSync(myTmp, payload); sig("p1-written"); wait("p2-written");
+        fs.renameSync(myTmp, target); sig("p1-renamed");
+      } else {
+        wait("p1-written");
+        fs.writeFileSync(myTmp, payload); sig("p2-written"); wait("p1-renamed");
+        fs.renameSync(myTmp, target);                 // last renamer wins whole-file
+      }
+    }
+  `, mode, join(dir, "published.json"), myTmp, join(dir, me === "p1" ? "p1.json" : "p2.json"), barrier, me], { stdio: ["ignore", "pipe", "pipe"] });
+  const run2 = (mode, tmp1, tmp2) => Promise.all([child(mode, "p1", tmp1), child(mode, "p2", tmp2)].map(
+    p => new Promise((res, rej) => { let err = ""; p.stderr.on("data", d => err += d); p.on("error", rej); p.on("exit", c => res({ c, err })); })));
+  const readPub = () => readFileSync(join(dir, "published.json"), "utf8");
+
+  // 17a: pre-fix shared-temp shape - the tear, deterministically.
+  {
+    const shared = join(dir, "shared.tmp");
+    const [r1, r2] = await run2("shared", shared, shared);
+    const pub = readPub();
+    let parses = true; try { JSON.parse(pub); } catch { parses = false; }
+    check("shared-temp harness: both writers completed", r1.c === 0 && r2.c === 0, `${r1.c} ${r2.c} ${r1.err} ${r2.err}`);
+    check("shared-temp shape (pre-fix): published file is torn, not the last complete payload", !parses && pub !== payload2, pub.slice(0, 120));
+    rmSync(join(dir, "published.json"));
+  }
+
+  // 17b: shipped per-writer-temp shape - isolation, deterministically.
+  {
+    const [r1, r2] = await run2("unique", join(dir, "u.111.tmp"), join(dir, "u.222.tmp"));
+    const pub = readPub();
+    let parsed = null; try { parsed = JSON.parse(pub); } catch {}
+    const { readdirSync } = await import("node:fs");
+    const debris = readdirSync(dir).filter(f => f.endsWith(".tmp"));
+    check("per-writer temps: both writers completed", r1.c === 0 && r2.c === 0, `${r1.c} ${r2.c} ${r1.err} ${r2.err}`);
+    check("per-writer temps: published file is one COMPLETE payload (last renamer wins)", pub === payload2, pub.slice(0, 120));
+    check("per-writer temps: published file parses", parsed && parsed.roomB === 2, pub.slice(0, 80));
+    check("per-writer temps: no temp debris", debris.length === 0, debris.join(","));
+  }
+  rmSync(dir, { recursive: true, force: true });
 }
 
 process.exit(failures ? 1 : 0);
