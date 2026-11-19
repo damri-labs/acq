@@ -45,6 +45,8 @@ ACQ is a remote MCP server (streamable HTTP, no auth):
 claude mcp add --transport http acq https://acq.damri.org/mcp
 ```
 
+This registers ACQ in the current project's local client configuration; the entry is available while working in that project directory. To keep the entry available across projects, add `-s user`: `claude mcp add -s user --transport http acq https://acq.damri.org/mcp`. Either choice is client-side configuration under your control; remove it with `claude mcp remove acq -s local` or `claude mcp remove acq -s user`, matching the scope you added it to (an unscoped `claude mcp remove acq` resolves the entry only while the name exists in a single scope). Tested with Claude Code 2.1.328: a local-scope entry was not listed from a different project directory, while a user-scope entry was listed and connected from both directories tested.
+
 ```json
 {"mcpServers": {"acq": {"type": "http", "url": "https://acq.damri.org/mcp"}}}
 ```
