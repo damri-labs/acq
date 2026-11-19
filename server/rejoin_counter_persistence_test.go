@@ -11,6 +11,15 @@ import (
 	"testing"
 )
 
+// wrongCodeFor returns a valid-format 6-digit code that is guaranteed not
+// to equal the room's generated pairing code (no random collision flake).
+func wrongCodeFor(pairCode string) string {
+	if pairCode != "000000" {
+		return "000000"
+	}
+	return "111111"
+}
+
 // reloadRooms simulates a restart: wipe in-memory state, reload from disk.
 func reloadRooms() {
 	roomsMu.Lock()
@@ -42,8 +51,9 @@ func TestVerifyLockoutSurvivesReload(t *testing.T) {
 
 	c := createRoom(t, srv.URL)
 	_, tokB := joinRoom(t, srv.URL, c.RoomID)
+	wrong := wrongCodeFor(c.PairCode)
 	for i := 0; i < 5; i++ {
-		if verifyCode(t, srv.URL, c.RoomID, tokB, "000000") {
+		if verifyCode(t, srv.URL, c.RoomID, tokB, wrong) {
 			t.Fatalf("attempt %d: wrong code matched", i+1)
 		}
 	}
@@ -67,8 +77,9 @@ func TestRejoinCounterSurvivesReload(t *testing.T) {
 
 	c := createRoom(t, srv.URL)
 	joinRoom(t, srv.URL, c.RoomID)
+	wrong := wrongCodeFor(c.PairCode)
 	for i := 0; i < 3; i++ {
-		if code := rejoinSeat(t, srv.URL, c.RoomID, "000000", "A"); code != http.StatusNotFound {
+		if code := rejoinSeat(t, srv.URL, c.RoomID, wrong, "A"); code != http.StatusNotFound {
 			t.Fatalf("wrong rejoin %d: got %d, want 404", i+1, code)
 		}
 	}
@@ -76,7 +87,7 @@ func TestRejoinCounterSurvivesReload(t *testing.T) {
 	reloadRooms()
 
 	for i := 0; i < 2; i++ {
-		if code := rejoinSeat(t, srv.URL, c.RoomID, "000000", "A"); code != http.StatusNotFound {
+		if code := rejoinSeat(t, srv.URL, c.RoomID, wrong, "A"); code != http.StatusNotFound {
 			t.Fatalf("wrong rejoin after reload %d: got %d, want 404", i+1, code)
 		}
 	}
@@ -94,9 +105,10 @@ func TestVerifyCounterResetAfterFailedSaveAndReload(t *testing.T) {
 	c := createRoom(t, srv.URL)
 	_, tokB := joinRoom(t, srv.URL, c.RoomID)
 
+	wrong := wrongCodeFor(c.PairCode)
 	withPersistFail(t, "pre")
 	for i := 0; i < 5; i++ {
-		if verifyCode(t, srv.URL, c.RoomID, tokB, "000000") {
+		if verifyCode(t, srv.URL, c.RoomID, tokB, wrong) {
 			t.Fatalf("attempt %d: wrong code matched", i+1)
 		}
 	}
