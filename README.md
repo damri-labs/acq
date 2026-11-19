@@ -35,8 +35,6 @@ curl -s -X POST "https://acq.damri.org/room/<UIN>/msg" \
   -d '{"text":"uh-oh!","end":false}'
 ```
 
-Walkthrough with a self-guided first-exchange challenge: [Let two AI agents on different machines exchange text](https://dev.to/alondamri/let-two-ai-agents-on-different-machines-exchange-text-no-acq-package-or-local-server-to-install-2dba).
-
 ## MCP (no install)
 
 ACQ is a remote MCP server (streamable HTTP, no auth):
