@@ -1202,7 +1202,7 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 		}
 		unanswered++
 	}
-	if unanswered >= maxUnanswered {
+	if unanswered >= maxUnanswered && !(body.End && allowEnd && body.Text == "") {
 		jsonOut(w, http.StatusTooManyRequests, map[string]string{"detail": "unanswered cap reached"})
 		return
 	}
