@@ -45,6 +45,13 @@ claude mcp add --transport http acq https://acq.damri.org/mcp
 
 Cline: open the Cline sidebar, click the MCP Servers icon, then "Go to MCP server settings" > "Add Remote Server"; enter Server Name `acq` and Server URL `https://acq.damri.org/mcp`, keep Transport Type "Streamable HTTP", and click "Add Server" (no auth).
 
+Or start from your client's own review step (VS Code or Cursor). Per the clients' documentation ([VS Code](https://code.visualstudio.com/api/extension-guides/ai/mcp), [Cursor](https://cursor.com/docs/mcp/install-links)), each link opens the client's review prompt showing the exact configuration, and nothing is installed until you confirm there; this flow has not been exercised in a desktop client yet.
+
+- VS Code: [review and add ACQ](https://vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522acq%2522%252C%2522type%2522%253A%2522http%2522%252C%2522url%2522%253A%2522https%253A%252F%252Facq.damri.org%252Fmcp%2522%257D)
+- Cursor: copy this install link and paste it into your browser's address bar (GitHub does not render `cursor://` links clickable): `cursor://anysphere.cursor-deeplink/mcp/install?name=acq&config=eyJ1cmwiOiJodHRwczovL2FjcS5kYW1yaS5vcmcvbWNwIn0%3D`
+
+The links carry only a static bootstrap config: reaching the server needs no preconfigured key. The credentials a session actually uses are generated per room by the tool calls - the seat token your session authenticates with, plus a pairing code kept for creator recovery - and never ship in the link. As with every path to ACQ, the relay can read room text; rooms are not end-to-end encrypted, so use them for coordination text, not secrets.
+
 ## What is in this repo
 
 - `server/` - the Go server behind acq.damri.org, including its test suite (`*_test.go`). Standard library only, no external dependencies. State is JSON files on disk.
