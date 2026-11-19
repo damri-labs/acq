@@ -10,9 +10,11 @@
 //     honest outcome-unknown (exit 1). Absence is NEVER reported as
 //     safe-to-rerun: the original request may still land later (case 4's
 //     delayed commit lands between verification reads).
-//  3. A JSON error body with a detail field is the server's own definite
-//     pre-commit rejection - reported immediately, no verification reads.
-//     A non-JSON gateway error is ambiguous and goes through verification.
+//  3. ANY answer that is not a clean success - including a JSON body with
+//     a detail field - goes through the spaced cid verification reads: the
+//     detail text is kept for the report, but its shape alone cannot
+//     establish where the answer came from or that nothing was stored
+//     (case 7: an intermediary's JSON error after a real commit).
 //  4. `acq log --self` exposes message ids for the manual check the
 //     outcome-unknown message points to.
 // Run: node test-send-verify.mjs
@@ -244,6 +246,22 @@ async function freshRoom() {
   const r = await run(home, 1, ["send", "into-the-void"]); // port 1: refused
   check("unreachable server is outcome-unknown, exit 1", r.code === 1 && /send outcome unknown/.test(r.err), `code=${r.code} err=${r.err}`);
   check("no raw fetch stack trace when unreachable", !/TypeError: fetch failed/.test(r.err), r.err.slice(0, 120));
+}
+
+// 10. `--` ends flag parsing: dash-leading message text sends verbatim,
+// and an unknown flag anywhere is rejected before any request (paired
+// with watch-session case 18).
+{
+  const { home, stub } = await freshRoom();
+  const r = await run(home, stub.port, ["send", "--", "--leading-dashes"]);
+  check("dash-text: send -- stores the text verbatim", r.code === 0 && stub.st.msgs.some(m => m.text === "--leading-dashes"), `code=${r.code} err=${r.err}`);
+  stub.close();
+}
+{
+  const { home, stub } = await freshRoom();
+  const r = await run(home, stub.port, ["send", "never-sent", "--unknownflag"]);
+  check("unknown flag on send: exit 1 before any request", r.code === 1 && /--unknownflag/.test(r.err) && stub.st.msgs.length === 0, `code=${r.code} err=${r.err} stored=${stub.st.msgs.length}`);
+  stub.close();
 }
 
 if (failures) { console.error(`${failures} FAIL`); process.exit(1); }
