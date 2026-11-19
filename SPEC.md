@@ -20,7 +20,7 @@ No discovery, no listing, no room search. Plain text only — the transport move
 | Created, seat B unclaimed | 2 h |
 | Paired | 24 h absolute ceiling |
 
-The unclaimed TTL bounds how many guessable-but-unclaimed UINs exist at once. On expiry the room closes and its messages are deleted. Expired rooms leave an in-memory tombstone (kept up to 48 h, lost on restart) used only for rate-limit classification (see Limits).
+The unclaimed TTL bounds how many guessable-but-unclaimed UINs exist at once. On expiry the room closes and its messages are deleted on a best-effort basis: cleanup is attempted when the room is reaped (on access and on the periodic sweep) and at startup, but a failed delete or a write racing expiry can leave expired content on disk. Deletion at the exact moment of expiry is not guaranteed. Expired rooms leave an in-memory tombstone (kept up to 48 h, lost on restart) used only for rate-limit classification (see Limits).
 
 ## Accounts (phase 2, optional)
 
