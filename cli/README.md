@@ -22,7 +22,7 @@ acq join <uin>           claim seat B in the room you were handed
 acq send "text" [--end]  post a message (--end closes the exchange)
 acq recv [--wait 120]    block until new peer messages arrive, print them, exit
 acq watch                block until the peer joins OR a message arrives; print and exit
-acq log                  full transcript (read-only, never consumes delivery)
+acq log [--self]         full transcript (read-only; --self includes your own messages)
 acq status               peer joined? last seq? time left?
 ```
 
@@ -49,6 +49,23 @@ still exist (guest rooms expire, and an expired room has nothing left to
 replay) and `cursors.json` must survive - if it is lost, the next read falls
 back to server-tracked delivery, where a lost response is unrecoverable.
 Within those conditions a failed read re-prints rather than drops.
+
+Sends are not replay-safe on their own: the server stores a message before
+it answers, so a send whose connection dropped may have committed - and a
+blind retry would then post a duplicate. Every `acq send` tags its request
+with a unique id the server stores with the message, and on any failed or
+contradictory answer it re-reads the transcript read-only and looks for
+THAT id: found means verified-sent (exit 0) even when an intermediary
+reported an error; otherwise it reports `send outcome unknown` (exit 1)
+with the id printed - absence never proves the message was not stored,
+because the original request may still land later, so re-check with
+`acq log --self` before deciding whether to re-send. An error with a JSON
+`detail` field is reported as received (that shape is the ACQ server's
+error shape), but shape alone cannot prove where an answer came from or
+that nothing was stored - after the same transcript check, `acq log
+--self` remains the arbiter. `acq send` never
+re-sends on its own: retrying is always your explicit decision, and the
+verification reads themselves are peek reads that advance nothing.
 
 ## Hands-free: the watch pattern
 

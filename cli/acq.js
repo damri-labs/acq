@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -83,6 +84,7 @@ function parseArgs(argv) {
   const args = [], opts = {};
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--end") opts.end = true;
+    else if (argv[i] === "--self") opts.self = true;
     else if (argv[i] === "--wait") opts.wait = Number(argv[++i]);
     else if (argv[i] === "--room") opts.room = argv[++i];
     else args.push(argv[i]);
@@ -134,7 +136,72 @@ switch (cmd) {
   case "send": {
     const text = args[1];
     if (!text || !room) { console.error("usage: acq send \"text\" [--end]"); process.exit(1); }
-    const d = await api("POST", `/room/${room}/msg`, { token: state.token, body: { text, end: !!opts.end } });
+    // Every send carries a unique cid, stored with the message and echoed in
+    // reads, so an ambiguous outcome can be settled against THIS request -
+    // never inferred from text or timing (a prior identical message would
+    // make that guess wrong).
+    const cid = randomUUID();
+    const headers = { "Content-Type": "application/json" };
+    if (state.token) headers.Authorization = `Bearer ${state.token}`;
+    let res;
+    try {
+      res = await fetch(BASE + `/room/${room}/msg`, { method: "POST", headers, body: JSON.stringify({ text, end: !!opts.end, cid }) });
+    } catch {
+      res = null; // transport failure: no answer at all
+    }
+    // A JSON error body with a detail field comes from the ACQ server itself,
+    // whose rejections all precede storing the message: a definite answer.
+    // Anything else (socket drop, timeout, a proxy's non-JSON 502) leaves the
+    // outcome ambiguous: the server stores before answering, so the message
+    // may have committed.
+    // Any answer that is not a clean success leaves the outcome to the cid
+    // check - including a 2xx whose body is truncated or unparseable: the
+    // server commits BEFORE writing its answer, so a cut body means the
+    // message may well be stored. Likewise a JSON detail body is this
+    // server's error SHAPE, but shape cannot establish where the answer
+    // came from or that nothing was stored. The received answer is kept
+    // for reporting; the transcript check is the only arbiter.
+    let received = null;
+    if (res && !res.ok) {
+      const data = await res.json().catch(() => ({}));
+      received = `error ${res.status}: ${typeof data.detail === "string" ? data.detail : "request failed"}`;
+      res = null;
+    }
+    let d = null;
+    if (res) {
+      d = await res.json().catch(() => null);
+      if (!d || typeof d.seq !== "number") {
+        received = `error ${res.status}: unparseable response body`;
+        res = null;
+      }
+    }
+    if (!res) {
+      // Read-only verification: self=1 includes own messages, peek=1 advances
+      // no delivery cursor. cid PRESENT proves acceptance - it can even
+      // correct an error response that came from an intermediary after the
+      // server committed. cid ABSENT proves nothing, so spaced re-reads
+      // cover the delayed-commit window and the only honest outcomes are
+      // verified-sent and unknown. This never re-sends: re-sending stays
+      // the operator's explicit decision.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await new Promise(r => setTimeout(r, 2000));
+        let v;
+        try {
+          v = await api("GET", `/room/${room}/msg?self=1&peek=1&since=0`, { token: state.token });
+        } catch { continue; }
+        const hit = v.messages.find(m => m.cid === cid);
+        if (hit) {
+          console.log(`sent seq=${hit.seq} (verified after an ambiguous failure)`);
+          process.exit(0);
+        }
+      }
+      if (received) {
+        console.error(`${received} - but whether the request was stored is unconfirmed (id ${cid}); repeated transcript checks are negative. The answer may not have come from the ACQ server itself: re-check with 'acq log --self' before deciding; re-sending risks a duplicate if the original lands.`);
+        process.exit(1);
+      }
+      console.error(`send outcome unknown - the server has not confirmed storing it (id ${cid}). The original request may still land later. Check with 'acq log --self' before deciding; re-sending now risks a duplicate if the original arrives.`);
+      process.exit(1);
+    }
     console.log(`sent seq=${d.seq}${opts.end ? " (end)" : ""}`);
     break;
   }
@@ -238,8 +305,8 @@ switch (cmd) {
   }
   case "log": {
     if (!room) { console.error("no active room"); process.exit(1); }
-    const d = await api("GET", `/room/${room}/msg?since=0&wait=0&peek=1`, { token: state.token });
-    for (const m of d.messages) console.log(`[${m.seq}] peer: ${m.text}${m.end ? " (end)" : ""}`);
+    const d = await api("GET", `/room/${room}/msg?since=0&wait=0&peek=1${opts.self ? "&self=1" : ""}`, { token: state.token });
+    for (const m of d.messages) console.log(`[${m.seq}] ${opts.self && m.from === state.seat ? "you" : "peer"}: ${m.text}${m.end ? " (end)" : ""}${m.cid ? ` (id ${m.cid})` : ""}`);
     break;
   }
   case "status": {
