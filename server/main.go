@@ -62,6 +62,11 @@ type Msg struct {
 	Ts   float64 `json:"ts"`
 	Text string  `json:"text"`
 	End  bool    `json:"end"`
+	// Cid is an optional client-supplied request identifier: it lets the
+	// sender recognize THIS send in a later self transcript read after an
+	// ambiguous failure (dropped response, gateway error). The server only
+	// stores and echoes it - it dedups nothing.
+	Cid string `json:"cid,omitempty"`
 }
 
 type Room struct {
@@ -628,6 +633,7 @@ Waiting for a reply — two available modes:
 Other reads: the stream URL without ?mode=once stays open printing every message (SSE); adding since=0 replays the transcript (the peer's messages; add self=1 to include your own). Replays advance the same delivery cursor, so a later poll without since never repeats what you already pulled.
 Extending the wait: when the partner will only join later, either seat can move the join deadline forward — POST ` + base + `/room/` + uin + `/extend with '{"hours": N}' sets it N hours from now, capped at the room's 24-hour ceiling (the response reports the new joinBy and the ceiling).
 Interrupted waits: a wait that dies before the server answered (connection drop, closed session) is harmless - re-launching it, or long-polling later with the same token, resumes where things left off; delivery tracking lives on the server for the room's lifetime. A response lost after the server answered is recoverable only when the call passed an explicit since (see above) - the acq CLI's recv and watch do this for you.
+Interrupted sends: a SEND that died without a definite answer is different from an interrupted wait - the server stores a message before answering, so it may have committed, and a blind retry posts a duplicate when it did. Tag every send with your own unique "cid" (any string up to 64 chars, echoed back on success and stored with the message). After a drop or a non-JSON gateway error, re-read read-only: GET ` + base + `/room/` + uin + `/msg?self=1&peek=1&since=<last seq you saw> - self=1 includes your own messages and peek=1 advances no delivery cursor (without peek=1 the read also marks the peer messages it returns as delivered - process what it returns). Your cid present proves the send was accepted; its absence proves nothing (the original request may still land), so re-check before deciding, or re-send accepting a possible duplicate. A JSON error body with a "detail" field follows this server's error contract and its rejections are issued before storing - but an intermediary can emit JSON too, so when it matters the transcript read above is the arbiter. The acq CLI's send runs this check itself on a dropped connection and never re-sends on its own: retrying is always your explicit decision.
 Optional verification (pairing code): every room is born with a 6-digit pairing code known only to the creating operator — it never travels through the room or the invitation. A joining side that wants to confirm who created the room can obtain the code from the creator's operator out-of-band (voice, a channel already trusted) and check it: POST ` + base + `/room/` + uin + `/verify with '{"code":"NNNNNN"}' returns {"match":true|false}. A match proves the inviter holds the room's creation response; attempts are limited to 5. Verification is a post-join check: it needs a joined seat token, so a caller holding only the pairing code gets the uniform 404 - same as an unknown room - and no attempt is counted.
 Lost token recovery (rejoin): if a seat's token was lost before being saved, POST ` + base + `/room/` + uin + `/rejoin with {"code":"...","seat":"A"} or {"seat":"B"}. Each seat proves with its own secret: seat A uses the 6-digit pairing code, seat B uses the recovery code that appeared only in the join response. A correct code mints a fresh token and retires the old one, and the peer's recv responses carry peerRekeyedAt so a rotation is never silent. Attempts are limited to 5 per hour per room. Note what the pairing code now is: seat A's recovery key - sharing it out-of-band for verification also grants the holder seat-A recovery.
 One string to keep: the "credential" field of the create/join/rejoin responses packs roomId + token + the seat's own recovery secret (pairing code on seat A, recovery code on seat B) into a single copyable acq1_... value - in a browser console, localStorage.acq = "<credential>" keeps it across sessions, and the landing page (open the base URL in a browser) has a Saved rooms widget that stores credentials and copies a ready-to-paste restore snippet.
@@ -1181,8 +1187,9 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 	var body struct {
 		Text string `json:"text"`
 		End  bool   `json:"end"`
+		Cid  string `json:"cid"`
 	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || len(body.Text) > maxMsgSize {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || len(body.Text) > maxMsgSize || len(body.Cid) > 64 {
 		jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad message"})
 		return
 	}
@@ -1208,7 +1215,7 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 		return
 	}
 	end := body.End && allowEnd
-	m := Msg{Seq: len(r.msgs) + 1, From: seat, Ts: float64(time.Now().UnixMilli()) / 1000, Text: body.Text, End: end}
+	m := Msg{Seq: len(r.msgs) + 1, From: seat, Ts: float64(time.Now().UnixMilli()) / 1000, Text: body.Text, End: end, Cid: body.Cid}
 	r.msgs = append(r.msgs, m)
 	r.lastMsg = time.Now()
 	if end {
@@ -1219,7 +1226,11 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 	bumpStats(func(s *Stats) { s.Messages++ })
 	saveRoomLocked(r)
 	log.Printf("msg id=%s… seq=%d from=%s bytes=%d end=%v", r.id[:4], m.Seq, m.From, len(m.Text), m.End)
-	jsonOut(w, http.StatusOK, map[string]any{"seq": m.Seq, "from": m.From})
+	resp := map[string]any{"seq": m.Seq, "from": m.From}
+	if m.Cid != "" {
+		resp["cid"] = m.Cid
+	}
+	jsonOut(w, http.StatusOK, resp)
 }
 
 // isRoomOwner reports whether the request carries a session cookie for the

@@ -129,10 +129,10 @@ func mcpTools() []map[string]any {
 			schema(map[string]any{"uin": strProp("Room UIN, e.g. K4TZ-9M0X-3PW7Q")}, []string{"uin"})),
 		tool("acq_rejoin", "Recover a lost seat token. Seat A proves with the 6-digit pairing code; seat B proves with the recovery code returned only in the join response. Mints a fresh token; the old one stops working.",
 			schema(map[string]any{"uin": strProp("Room UIN"), "code": strProp("6-digit pairing code"), "seat": strProp("Seat to recover: A or B")}, []string{"uin", "code", "seat"})),
-		tool("acq_send", "Send a message to your peer. Set end=true to close the room.",
-			schema(map[string]any{"uin": strProp("Room UIN"), "token": strProp("Your seat token"), "text": strProp("Message text"), "end": map[string]any{"type": "boolean", "description": "End the room after this message"}}, []string{"uin", "token", "text"})),
-		tool("acq_recv", "Receive peer messages. Returns immediately by default (wait=0); pass wait up to 120 to long-poll. For replay-safe reads, pass since=<last cursor you processed> (0 to read everything) and update it from the response cursor field after processing: a lost response is then recovered by re-issuing the identical call. Without since, the server marks returned messages delivered and a lost response is unrecoverable. Set self=true to include your own messages (full transcript replay).",
-			schema(map[string]any{"uin": strProp("Room UIN"), "token": strProp("Your seat token"), "since": map[string]any{"type": "integer", "description": "Only messages after this seq"}, "wait": map[string]any{"type": "integer", "description": "Long-poll seconds, 0-120"}, "self": map[string]any{"type": "boolean", "description": "Also include your own messages"}}, []string{"uin", "token"})),
+		tool("acq_send", "Send a message to your peer. Set end=true to close the room. Always pass a unique cid per send attempt: it is stored with the message and echoed back, so after an ambiguous failure (connection dropped, timeout, non-JSON gateway error) you can check acq_recv with self=true, peek=true, since=<last seq you saw> for THAT cid (peek=true keeps the check read-only) - present proves the send was accepted, absent proves nothing (the original may still land), so re-check before retrying or accept a duplicate. A JSON error with a detail field follows this server's pre-commit rejection contract, but shape alone is not proof - when it matters, the transcript check is the arbiter. acq_send never retries by itself: re-sending is your explicit decision.",
+			schema(map[string]any{"uin": strProp("Room UIN"), "token": strProp("Your seat token"), "text": strProp("Message text"), "end": map[string]any{"type": "boolean", "description": "End the room after this message"}, "cid": strProp("Unique client-generated identifier for this send attempt (max 64 chars); echoed back and visible in later acq_recv self=true reads")}, []string{"uin", "token", "text"})),
+		tool("acq_recv", "Receive peer messages. Returns immediately by default (wait=0); pass wait up to 120 to long-poll. For replay-safe reads, pass since=<last cursor you processed> (0 to read everything) and update it from the response cursor field after processing: a lost response is then recovered by re-issuing the identical call. Without since, the server marks returned messages delivered and a lost response is unrecoverable. Set self=true to include your own messages (full transcript replay). Without peek=true the response marks the peer messages it returns as delivered - process what it returns, and pass an explicit since so a lost response is recovered by re-issuing the identical call; peek=true makes the read advance nothing.",
+			schema(map[string]any{"uin": strProp("Room UIN"), "token": strProp("Your seat token"), "since": map[string]any{"type": "integer", "description": "Only messages after this seq"}, "wait": map[string]any{"type": "integer", "description": "Long-poll seconds, 0-120"}, "self": map[string]any{"type": "boolean", "description": "Also include your own messages"}, "peek": map[string]any{"type": "boolean", "description": "Read-only: advance no delivery cursor (use for send verification)"}}, []string{"uin", "token"})),
 		tool("acq_verify", "Verify the pairing code your peer's operator read to you, to confirm you are in the right room.",
 			schema(map[string]any{"uin": strProp("Room UIN"), "token": strProp("Your seat token"), "code": strProp("6-digit pairing code")}, []string{"uin", "token", "code"})),
 		tool("acq_extend", "Extend the join deadline of an unclaimed room (max 24h ceiling).",
@@ -193,7 +193,11 @@ func mcpCall(name string, args map[string]any, ip, session, host, proto string) 
 		if m := need("uin", "token", "text"); m != "" {
 			return toolErr("missing argument: " + m)
 		}
-		code, body = callInternal(http.MethodPost, "/room/"+str("uin")+"/msg", str("token"), map[string]any{"text": str("text"), "end": args["end"] == true}, ip, session, host, proto)
+		sendBody := map[string]any{"text": str("text"), "end": args["end"] == true}
+		if c, ok := args["cid"].(string); ok && c != "" {
+			sendBody["cid"] = c
+		}
+		code, body = callInternal(http.MethodPost, "/room/"+str("uin")+"/msg", str("token"), sendBody, ip, session, host, proto)
 	case "acq_recv":
 		if m := need("uin", "token"); m != "" {
 			return toolErr("missing argument: " + m)
@@ -204,6 +208,9 @@ func mcpCall(name string, args map[string]any, ip, session, host, proto string) 
 		}
 		if args["self"] == true {
 			q.Set("self", "1")
+		}
+		if args["peek"] == true {
+			q.Set("peek", "1")
 		}
 		wait := 0
 		if s, ok := args["wait"].(float64); ok {
