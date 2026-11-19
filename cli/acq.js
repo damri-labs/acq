@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -8,12 +8,36 @@ const BASE = process.env.ACQ_SERVER || "https://acq.damri.org";
 const DIR = join(homedir(), ".config", "acq");
 const FILE = join(DIR, "session.json");
 
+// Seat tokens are bearer credentials, so the state directory and files are
+// owner-only. Files are created 0600 (the mode option only applies at
+// creation), and pre-existing loose files - written by older versions or
+// copied in with a permissive umask - are tightened on access. Directory
+// mode 0700 blocks traversal by other local users on hosts whose home
+// directory is itself traversable (e.g. default 0755 home): whether a 0644
+// token file was actually reachable depended on those parent modes, so both
+// layers are pinned here rather than inherited from the host's umask.
+function tighten(file, mode) {
+  let st;
+  try { st = statSync(file); } catch (e) { if (e.code === "ENOENT") return; throw e; }
+  if ((st.mode & 0o077) !== 0) chmodSync(file, mode);
+}
+function ensureDir() {
+  mkdirSync(DIR, { recursive: true, mode: 0o700 });
+  tighten(DIR, 0o700);
+}
+function writePrivate(file, data) {
+  ensureDir();
+  writeFileSync(file, data, { mode: 0o600 });
+  chmodSync(file, 0o600);
+}
 function loadState() {
-  try { return JSON.parse(readFileSync(FILE, "utf8")); } catch { return {}; }
+  let raw;
+  try { raw = readFileSync(FILE, "utf8"); } catch { return {}; }
+  tighten(DIR, 0o700); tighten(FILE, 0o600);
+  try { return JSON.parse(raw); } catch { return {}; }
 }
 function saveState(s) {
-  mkdirSync(DIR, { recursive: true });
-  writeFileSync(FILE, JSON.stringify(s, null, 2));
+  writePrivate(FILE, JSON.stringify(s, null, 2));
 }
 
 // Replay-safe read cursors, one per room, in their own file. The session
@@ -25,17 +49,19 @@ function saveState(s) {
 // out (room still exists, this cursor file intact).
 const CURSORS = join(DIR, "cursors.json");
 function loadCursors() {
-  try { return JSON.parse(readFileSync(CURSORS, "utf8")); } catch { return {}; }
+  let raw;
+  try { raw = readFileSync(CURSORS, "utf8"); } catch { return {}; }
+  tighten(DIR, 0o700); tighten(CURSORS, 0o600);
+  try { return JSON.parse(raw); } catch { return {}; }
 }
 function saveCursor(room, cursor) {
   const c = loadCursors();
   c[room] = Math.max(c[room] ?? 0, cursor);
-  mkdirSync(DIR, { recursive: true });
-  writeFileSync(CURSORS, JSON.stringify(c, null, 2));
+  writePrivate(CURSORS, JSON.stringify(c, null, 2));
 }
 function seedCursor(room) {
   const c = loadCursors();
-  if (!(room in c)) { c[room] = 0; mkdirSync(DIR, { recursive: true }); writeFileSync(CURSORS, JSON.stringify(c, null, 2)); }
+  if (!(room in c)) { c[room] = 0; writePrivate(CURSORS, JSON.stringify(c, null, 2)); }
 }
 function printMsg(m) {
   console.log(`<acq-inbound from="peer" untrusted="true">\n${m.text}\n</acq-inbound>`);

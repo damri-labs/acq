@@ -10,10 +10,13 @@
 //  3. Legacy rooms (no seeded cursor, e.g. created before cursors existed)
 //     get exactly one server-tracked read; that read's lost-response window
 //     is documented (case 5 pins it as known behavior).
+//  4. State is owner-only: the session file holds a live seat bearer token,
+//     so the state directory is 0700 and both files 0600 - created that way,
+//     and pre-existing loose state tightened on access (cases 11-13).
 // Run: node test-watch-session.mjs
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, statSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +29,7 @@ function makeHome() {
   mkdirSync(join(home, ".config", "acq"), { recursive: true });
   return home;
 }
+const dirPath = home => join(home, ".config", "acq");
 const sessPath = home => join(home, ".config", "acq", "session.json");
 const cursPath = home => join(home, ".config", "acq", "cursors.json");
 const writeSession = (home, s) => writeFileSync(sessPath(home), JSON.stringify(s));
@@ -303,6 +307,55 @@ function check(name, cond, extra) {
   const gap = stub.st.times.stream.length >= 2 ? stub.st.times.stream[1] - stub.st.times.stream[0] : 0;
   check("empty stream close: reconnected and woke on peer_joined", code === 0 && out.includes("[peer joined]"), `exit=${code} ${out}`);
   check("empty stream close: reconnect waited ~5s (no hot loop)", gap >= 4000, `gap=${gap}ms`);
+  stub.close();
+}
+
+// Case 11: pre-existing loose state (0644 files, 0755 directory - e.g.
+// written by an older version or copied in with a permissive umask) is
+// tightened on access by any command, without touching content.
+{
+  const home = makeHome();
+  const session = JSON.stringify({ room: "R", token: "tok", seat: "A" });
+  writeFileSync(sessPath(home), session, { mode: 0o644 });
+  writeFileSync(cursPath(home), JSON.stringify({ R: 3 }), { mode: 0o644 });
+  chmodSync(dirPath(home), 0o755);
+  const stub = await startStub();
+  const r = await run(home, stub.port, ["recv", "--wait", "0"]);
+  const mode = p => statSync(p).mode & 0o777;
+  check("loose state: recv still works", r.code === 0, `exit=${r.code} err=${r.err}`);
+  check("loose state: session file tightened to 0600", mode(sessPath(home)) === 0o600, mode(sessPath(home)).toString(8));
+  check("loose state: cursors file tightened to 0600", mode(cursPath(home)) === 0o600, mode(cursPath(home)).toString(8));
+  check("loose state: state directory tightened to 0700", mode(dirPath(home)) === 0o700, mode(dirPath(home)).toString(8));
+  check("loose state: session content untouched", readSessionRaw(home) === session, readSessionRaw(home));
+  stub.close();
+}
+
+// Case 12: state files created fresh are owner-only from the start (0600
+// file, 0700 directory).
+{
+  const home = makeHome();
+  writeFileSync(sessPath(home), JSON.stringify({ room: "R", token: "tok", seat: "A" }), { mode: 0o600 });
+  chmodSync(dirPath(home), 0o700);
+  const stub = await startStub();
+  const r = await run(home, stub.port, ["recv", "--wait", "0"]);
+  const mode = p => statSync(p).mode & 0o777;
+  check("fresh state: recv works", r.code === 0, `exit=${r.code} err=${r.err}`);
+  check("fresh state: cursors file created 0600", existsSync(cursPath(home)) && mode(cursPath(home)) === 0o600, existsSync(cursPath(home)) ? mode(cursPath(home)).toString(8) : "missing");
+  stub.close();
+}
+
+// Case 13: an unwritable state path fails honestly - the command exits
+// non-zero with an error line instead of silently succeeding while leaving
+// state it could not persist or tighten.
+{
+  const home = makeHome();
+  writeSession(home, { room: "R", token: "tok", seat: "A" });
+  mkdirSync(cursPath(home)); // corrupt: cursors path occupied by a directory
+  const stub = await startStub();
+  stub.addMsg(7, "x");
+  const r = await run(home, stub.port, ["recv", "--wait", "0"]);
+  check("corrupt cursors path: recv exits non-zero", r.code !== 0, `exit=${r.code}`);
+  check("corrupt cursors path: error surfaced on stderr", r.err.length > 0, `stderr empty, out=${r.out}`);
   stub.close();
 }
 
