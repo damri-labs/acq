@@ -408,6 +408,61 @@ func TestPublicFeedback(t *testing.T) {
 	}
 }
 
+// In-room feedback: a live seat token posts an entry stored with its room
+// and seat; blank or whitespace-only text is refused the same way the
+// public endpoint refuses it; requests without a valid seat token get the
+// deliberately-indistinguishable 404.
+func TestRoomFeedback(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+	c := createRoom(t, srv.URL)
+
+	post := func(token, text string) int {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/room/"+c.RoomID+"/feedback",
+			strings.NewReader(`{"text":`+quote(text)+`,"purpose":"release-check trial"}`))
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("room feedback post: %v", err)
+		}
+		defer res.Body.Close()
+		return res.StatusCode
+	}
+
+	if code := post(c.Token, "step 3 link 404s for me"); code != http.StatusOK {
+		t.Fatalf("valid in-room feedback: got %d, want 200", code)
+	}
+	if code := post(c.Token, "   "); code != http.StatusBadRequest {
+		t.Fatalf("whitespace-only in-room feedback: got %d, want 400", code)
+	}
+	if code := post(c.Token, ""); code != http.StatusBadRequest {
+		t.Fatalf("empty in-room feedback: got %d, want 400", code)
+	}
+	if code := post("", "x"); code != http.StatusNotFound {
+		t.Fatalf("tokenless in-room feedback: got %d, want 404", code)
+	}
+	if code := post("wrong-token", "x"); code != http.StatusNotFound {
+		t.Fatalf("wrong-token in-room feedback: got %d, want 404", code)
+	}
+
+	feedbackMu.Lock()
+	b, err := os.ReadFile(feedbackPath)
+	feedbackMu.Unlock()
+	if err != nil {
+		t.Fatalf("read feedback log: %v", err)
+	}
+	body := string(b)
+	if !strings.Contains(body, "step 3 link 404s for me") || !strings.Contains(body, `"seat":"A"`) {
+		t.Fatalf("feedback log missing room entry: %q", body)
+	}
+	if strings.Contains(body, `"text":"   "`) {
+		t.Fatalf("whitespace-only entry was stored: %q", body)
+	}
+}
+
 func TestExplainerBriefing(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()

@@ -1714,7 +1714,7 @@ func handleRoom(w http.ResponseWriter, req *http.Request) {
 			Text    string `json:"text"`
 			Purpose string `json:"purpose"`
 		}
-		if err := json.NewDecoder(req.Body).Decode(&fb); err != nil || len(fb.Text) > 4096 || len(fb.Purpose) > 1024 || fb.Text == "" {
+		if err := json.NewDecoder(req.Body).Decode(&fb); err != nil || len(fb.Text) > 4096 || len(fb.Purpose) > 1024 || strings.TrimSpace(fb.Text) == "" {
 			jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad feedback"})
 			return
 		}
