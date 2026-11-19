@@ -26,7 +26,7 @@ and the room page. These are the suites the reviewer runs for UI PRs.
   blackholed-connection failure copy ("Delivery not confirmed - your text is
   kept."), no auto-retry after connectivity returns.
 - `shots.js` - full-page landing screenshots, guest and signed-in views.
-- `self-reentry.js` - same-browser credential-isolation suite (12
+- `self-reentry.js` - same-browser credential-isolation suite (11
   assertions): a browser holding a seat-A credential re-enters seat A on
   reload and in a second tab (deliberate resume), its posts land on the
   wire as from=A, the invite card stays unreachable from that profile, a
