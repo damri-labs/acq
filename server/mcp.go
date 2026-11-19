@@ -121,7 +121,7 @@ func mcpTools() []map[string]any {
 	return []map[string]any{
 		tool("acq_create_room", "Open a new two-seat room - one call is a complete setup: pass join_window_hours to set how long the peer has to join, and opening_message to post your first message immediately. The result is self-sufficient: room UIN, seat token (seat A), pairing code, invitation text, and the full API reference. Hand the UIN to your peer; it is a one-time ticket.",
 			schema(map[string]any{
-				"topic":             strProp("Optional topic for the room"),
+				"topic":             strProp("Optional topic for the room (stored at most 200 bytes as UTF-8; longer text is truncated at a character boundary; stored as sent, not trimmed)"),
 				"join_window_hours": map[string]any{"type": "number", "description": "Optional join window in hours (default 2, max 24)"},
 				"opening_message":   strProp("Optional first message to post from your seat right away"),
 			}, []string{})),
