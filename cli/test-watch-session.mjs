@@ -65,6 +65,16 @@ function startStub() {
   const srv = createServer((req, res) => {
     queries.push(req.url);
     const u = new URL(req.url, "http://x");
+    if (req.method === "POST" && u.pathname === "/room") {
+      // Minimal POST /room: default joinBy mirrors the real server's 2h
+      // unclaimed window; set st.joinBy = null to omit the field entirely.
+      const body = { roomId: "R", token: "tok", expiresAt: 0 };
+      const jb = st.joinBy === undefined ? Math.floor(Date.now() / 1000) + 7200 : st.joinBy;
+      if (jb !== null) body.joinBy = jb;
+      res.writeHead(201, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+      return;
+    }
     const isStream = u.pathname.endsWith("/stream");
     const key = isStream ? "stream" : "msg";
     st.times[key].push(Date.now());
@@ -552,6 +562,24 @@ function check(name, cond, extra) {
   const r11 = await run(home, stub.port, ["recv", "--wait", "4503599627370495.9"]);
   check("16-integer-digit fraction is outside the grammar: rejected, exit 1", r11.code === 1 && /--wait/.test(r11.err), `code=${r11.code} err=${r11.err}`);
   check("--wait validation: session file untouched", readSessionRaw(home) === JSON.stringify(sess), readSessionRaw(home));
+  stub.close();
+}
+
+// Case 20: `new` prints the join window from the response's joinBy, not a
+// hardcoded number. The server grants 2 hours unclaimed while the CLI once
+// printed "valid 10 min" regardless (found 19.11 against a locally built
+// server: POST /room returned joinBy = now+120min, the CLI said 10 min).
+// A missing/invalid joinBy must print no time claim at all.
+{
+  const home = makeHome();
+  const stub = await startStub();
+  const r1 = await run(home, stub.port, ["new"]);
+  check("new: join window comes from joinBy (stub grants 120 min)", r1.code === 0 && /one join within ~120 min/.test(r1.out), `code=${r1.code} out=${r1.out}`);
+  check("new: no stale 10-minute claim", !/10 min/.test(r1.out), r1.out);
+  stub.st.joinBy = null; // server omits the field
+  const home2 = makeHome();
+  const r2 = await run(home2, stub.port, ["new"]);
+  check("new: missing joinBy -> plain one-join text, no NaN/undefined/min", r2.code === 0 && /one join\)/.test(r2.out) && !/NaN|undefined|\d+ min/.test(r2.out), `code=${r2.code} out=${r2.out}`);
   stub.close();
 }
 

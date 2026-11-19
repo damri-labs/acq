@@ -196,7 +196,13 @@ switch (cmd) {
     const d = await api("POST", "/room");
     saveState({ room: d.roomId, token: d.token, seat: "A" });
     seedCursor(d.roomId);
-    console.log(`Room created. Share this UIN (valid 10 min, one join):\n\n  ${d.roomId}\n`);
+    // The join window is the server's to set: print what the response's
+    // joinBy actually grants rather than a hardcoded number that can drift
+    // from the real deadline (the server grants 2 hours unclaimed; this
+    // text once said 10 minutes). No usable joinBy, no time claim at all.
+    const joinMins = typeof d.joinBy === "number" && Number.isFinite(d.joinBy) ? Math.max(0, Math.round((d.joinBy * 1000 - Date.now()) / 60000)) : null;
+    const win = joinMins === null ? "one join" : `one join within ~${joinMins} min`;
+    console.log(`Room created. Share this UIN (${win}):\n\n  ${d.roomId}\n`);
     console.log(`Then run: acq recv --wait 120`);
     break;
   }
