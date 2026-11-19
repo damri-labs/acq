@@ -424,6 +424,16 @@ document.getElementById('fb').addEventListener('submit', function(e){
   var btn = document.getElementById('open-go');
   var topicIn = document.getElementById('open-topic');
   var st = document.getElementById('open-status');
+  // A credential packs {uin, token, ...}; the UIN decoded from it must BE
+  // the room this answer created - a mismatch is no credential to save.
+  function credBinds(blob, roomId){
+    if (!blob || blob.slice(0,5) !== 'acq1_') return false;
+    try {
+      var b64 = blob.slice(5).replace(/-/g,'+').replace(/_/g,'/');
+      var c = JSON.parse(atob(b64 + '='.repeat((4 - b64.length % 4) % 4)));
+      return !!(c.uin && c.token) && c.uin.toUpperCase() === roomId.toUpperCase();
+    } catch(e){ return false; }
+  }
   function go(){
     btn.disabled = true;
     st.textContent = '';
@@ -433,8 +443,17 @@ document.getElementById('fb').addEventListener('submit', function(e){
       body: JSON.stringify({ topic: topicIn.value.trim() })
     }).then(function(r){
       if (r.status === 429) { st.textContent = 'Slow down - too many rooms from this address.'; return null; }
-      if (!r.ok) { st.textContent = 'Could not open a room (' + r.status + ').'; return null; }
-      return r.json();
+      // Typed storage outcomes: stored:false is a definite pre-commit
+      // rejection; stored:"unknown" with a usable credential means the
+      // room EXISTS - the credential must be kept, never dropped.
+      return r.json().catch(function(){ return null; }).then(function(d){
+        if (r.ok && d && d.credential && d.roomId) return d;
+        if (d && d.stored === false) { st.textContent = (d.detail || 'Could not open a room.') + ' Nothing was created - try again.'; return null; }
+        if (d && d.stored === 'unknown' && d.roomId && credBinds(d.credential, d.roomId)) { d._durabilityUnknown = true; return d; }
+        if (r.status >= 500 || r.ok) { st.textContent = 'The room may have been created, but no usable credential came back - it cannot be reclaimed and expires unclaimed. Open a fresh room instead.'; return null; }
+        st.textContent = 'Could not open a room (' + r.status + ').';
+        return null;
+      });
     }).then(function(d){
       btn.disabled = false;
       if (!d) return;
@@ -446,10 +465,15 @@ document.getElementById('fb').addEventListener('submit', function(e){
           localStorage.setItem(KEY, JSON.stringify(items));
         } catch(e){}
       }
+      if (d._durabilityUnknown) {
+        st.textContent = 'Room created and its credential saved, but the server could not confirm durable storage - if the room misbehaves after a server restart, open a fresh one. Taking you there...';
+        setTimeout(function(){ location.href = '/room/' + encodeURIComponent(d.roomId); }, 3500);
+        return;
+      }
       location.href = '/room/' + encodeURIComponent(d.roomId);
     }).catch(function(){
       btn.disabled = false;
-      st.textContent = 'Network error - try again.';
+      st.textContent = 'Network error - if a room was created its credential never arrived and it expires unclaimed; try again.';
     });
   }
   btn.addEventListener('click', go);

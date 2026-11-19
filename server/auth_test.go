@@ -341,7 +341,12 @@ func TestPermanentRoomLifecycle(t *testing.T) {
 	}
 
 	// Persistence round trip: a permanent room survives save+load.
-	saveRoom(r)
+	r.mu.Lock()
+	if outcome, err := writeRoom(roomDiskFrom(r)); outcome != persistOK {
+		r.mu.Unlock()
+		t.Fatalf("writeRoom: outcome=%v err=%v", outcome, err)
+	}
+	r.mu.Unlock()
 	roomsMu.Lock()
 	rooms = map[string]*Room{}
 	roomsMu.Unlock()

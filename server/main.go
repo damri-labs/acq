@@ -176,17 +176,50 @@ var (
 )
 
 // appendFeedback persists one feedback entry; stdout logging remains the fallback.
-func appendFeedback(entry map[string]any) {
+// appendFeedback appends one JSON line. It reports whether the entry was
+// definitely NOT stored (the file never opened) versus written but with a
+// failed write/sync (a partial line is then possible in principle; readers
+// skip undecodable lines).
+func appendFeedback(entry map[string]any) (stored bool, err error) {
 	feedbackMu.Lock()
 	defer feedbackMu.Unlock()
 	f, err := os.OpenFile(feedbackPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Printf("feedback_file_error: %v", err)
+		return false, err
+	}
+	b, _ := json.Marshal(entry)
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		f.Close()
+		log.Printf("feedback_file_error: %v", err)
+		return true, err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		log.Printf("feedback_file_error: %v", err)
+		return true, err
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("feedback_file_error: %v", err)
+		return true, err
+	}
+	return true, nil
+}
+
+// feedbackResult answers a feedback post honestly: a definite not-stored
+// when nothing was written, an unknown outcome when a partial write or a
+// failed sync leaves the result in doubt - never a blanket "5xx means no
+// data".
+func feedbackResult(w http.ResponseWriter, stored bool, err error) {
+	if err == nil {
+		jsonOut(w, http.StatusOK, map[string]string{"thanks": "feedback recorded"})
 		return
 	}
-	defer f.Close()
-	b, _ := json.Marshal(entry)
-	f.Write(append(b, '\n'))
+	if !stored {
+		jsonOut(w, http.StatusInternalServerError, map[string]any{"detail": "feedback was not stored (storage failure); retrying is safe", "stored": false})
+		return
+	}
+	jsonOut(w, http.StatusInternalServerError, map[string]any{"detail": "feedback may not have been stored; the outcome is unknown", "stored": "unknown"})
 }
 
 type penalty struct {
@@ -281,33 +314,114 @@ type roomDisk struct {
 	Provisional  bool      `json:"provisional,omitempty"`
 }
 
-// saveRoomLocked snapshots r to disk. Caller must hold r.mu.
-func saveRoomLocked(r *Room) {
-	d := roomDisk{ID: r.id, TokenA: r.tokenA, TokenB: r.tokenB, Created: r.created, PairedAt: r.pairedAt, LastMsg: r.lastMsg, Msgs: r.msgs, Ended: r.ended, DeliveredA: r.deliveredA, DeliveredB: r.deliveredB, JoinDeadline: r.joinDeadline, Topic: r.topic, PairCode: r.pairCode, VerifyFails: r.verifyFails, RecoveryB: r.recoveryB, KindB: r.kindB, RejoinFails: r.rejoinFails, RejoinWindow: r.rejoinWindow, RekeyedA: r.rekeyedA, RekeyedB: r.rekeyedB, OwnerID: r.ownerID, Permanent: r.permanent, Provisional: r.provisional}
+// roomDiskFrom snapshots r. Caller must hold r.mu, or the room must not be
+// shared yet (creation, before registration).
+func roomDiskFrom(r *Room) roomDisk {
+	return roomDisk{ID: r.id, TokenA: r.tokenA, TokenB: r.tokenB, Created: r.created, PairedAt: r.pairedAt, LastMsg: r.lastMsg, Msgs: r.msgs, Ended: r.ended, DeliveredA: r.deliveredA, DeliveredB: r.deliveredB, JoinDeadline: r.joinDeadline, Topic: r.topic, PairCode: r.pairCode, VerifyFails: r.verifyFails, RecoveryB: r.recoveryB, KindB: r.kindB, RejoinFails: r.rejoinFails, RejoinWindow: r.rejoinWindow, RekeyedA: r.rekeyedA, RekeyedB: r.rekeyedB, OwnerID: r.ownerID, Permanent: r.permanent, Provisional: r.provisional}
+}
+
+// persistOutcome classifies a writeRoom result.
+type persistOutcome int
+
+const (
+	persistOK persistOutcome = iota
+	// persistFailedDefinite: the rename never completed, so the previous
+	// file (if any) is untouched and nothing of the candidate state is on
+	// disk. The operation can be honestly reported as not stored.
+	persistFailedDefinite
+	// persistAmbiguous: the rename completed - the new file is visible -
+	// but the directory sync after it failed. The state must be treated as
+	// committed (reporting it as rejected would create a phantom); only
+	// the durability confirmation failed.
+	persistAmbiguous
+)
+
+// persistFailMode is a TEST-ONLY fault hook (ACQ_TEST_PERSIST_FAIL): "pre"
+// fails the write before the rename, "post" fails the directory sync after
+// a successful rename. It makes both outcome classes exercisable
+// deterministically and is never set in production configuration.
+var persistFailMode = os.Getenv("ACQ_TEST_PERSIST_FAIL")
+
+// writeRoom persists one room snapshot: temp file, fsync, rename, directory
+// fsync. That is qualified kernel-storage ordering only - no physical or
+// power-loss guarantee is claimed. Correct acknowledgment does not depend
+// on a storage backend's rename/sync behavior beyond the local syscall
+// contract: on the supported local filesystem a rename either happens or
+// returns an error.
+func writeRoom(d roomDisk) (persistOutcome, error) {
 	b, err := json.Marshal(d)
 	if err != nil {
-		return
+		return persistFailedDefinite, err
 	}
 	if err := os.MkdirAll(roomsDir, 0755); err != nil {
-		log.Printf("room_save_error id=%s... err=%v", r.id[:4], err)
-		return
+		return persistFailedDefinite, err
 	}
-	tmp := filepath.Join(roomsDir, r.id+".tmp")
-	if err := os.WriteFile(tmp, b, 0600); err != nil {
-		log.Printf("room_save_error id=%s... err=%v", r.id[:4], err)
-		return
+	if persistFailMode == "pre" {
+		return persistFailedDefinite, errors.New("injected pre-rename failure")
 	}
-	os.Rename(tmp, filepath.Join(roomsDir, r.id+".json"))
+	tmp := filepath.Join(roomsDir, d.ID+".tmp")
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return persistFailedDefinite, err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return persistFailedDefinite, err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return persistFailedDefinite, err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return persistFailedDefinite, err
+	}
+	if err := os.Rename(tmp, filepath.Join(roomsDir, d.ID+".json")); err != nil {
+		return persistFailedDefinite, err
+	}
+	if persistFailMode == "post" {
+		return persistAmbiguous, errors.New("injected post-rename dir-sync failure")
+	}
+	dir, err := os.Open(roomsDir)
+	if err != nil {
+		return persistAmbiguous, err
+	}
+	if err := dir.Sync(); err != nil {
+		dir.Close()
+		return persistAmbiguous, err
+	}
+	dir.Close()
+	return persistOK, nil
 }
 
-func saveRoom(r *Room) {
-	r.mu.Lock()
-	saveRoomLocked(r)
-	r.mu.Unlock()
+// storageFailure answers a mutation whose candidate state could not be
+// stored at all (a pre-rename failure): a definite not-stored rejection.
+// Memory was never committed, no waiter was notified, no seq or cid was
+// consumed, and the client's documented re-read shows the absence, so
+// retrying the request is safe.
+func storageFailure(w http.ResponseWriter, what string) {
+	jsonOut(w, http.StatusInternalServerError, map[string]any{"detail": what + " was not stored (storage failure); the operation had no effect and retrying is safe", "stored": false})
 }
 
-func deleteRoomFile(id string) {
-	os.Remove(filepath.Join(roomsDir, id+".json"))
+// storageAmbiguous answers a mutation whose candidate state IS on the
+// filesystem (the rename completed) but whose durability confirmation
+// failed. The state is committed in memory and visible to reads, so this is
+// never a definite rejection; the caller is told the outcome is unknown and
+// how to settle it (a send settles against its cid; other operations
+// re-read the room). The operation's normal payload rides along.
+func storageAmbiguous(w http.ResponseWriter, detail string, payload any) {
+	b, _ := json.Marshal(payload)
+	var fields map[string]any
+	json.Unmarshal(b, &fields)
+	fields["detail"] = detail
+	fields["stored"] = "unknown"
+	jsonOut(w, http.StatusInternalServerError, fields)
+}
+
+func deleteRoomFile(id string) error {
+	return os.Remove(filepath.Join(roomsDir, id+".json"))
 }
 
 func loadRooms() {
@@ -332,7 +446,9 @@ func loadRooms() {
 		r := &Room{id: d.ID, tokenA: d.TokenA, tokenB: d.TokenB, created: d.Created, pairedAt: d.PairedAt, lastMsg: d.LastMsg, msgs: d.Msgs, ended: d.Ended, deliveredA: d.DeliveredA, deliveredB: d.DeliveredB, joinDeadline: d.JoinDeadline, topic: d.Topic, pairCode: d.PairCode, verifyFails: d.VerifyFails, recoveryB: d.RecoveryB, kindB: d.KindB, rejoinFails: d.RejoinFails, rejoinWindow: d.RejoinWindow, rekeyedA: d.RekeyedA, rekeyedB: d.RekeyedB, ownerID: d.OwnerID, permanent: d.Permanent, provisional: d.Provisional, notify: make(chan struct{})}
 		if r.expired(now) {
 			addTombstone(r.id)
-			deleteRoomFile(r.id)
+			if err := deleteRoomFile(r.id); err != nil {
+				log.Printf("room_delete_error id=%s... err=%v", r.id[:4], err)
+			}
 			continue
 		}
 		roomsMu.Lock()
@@ -443,11 +559,11 @@ func handlePublicFeedback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	log.Printf("feedback_public purpose=%q text=%q", fb.Purpose, fb.Text)
-	appendFeedback(map[string]any{
+	stored, ferr := appendFeedback(map[string]any{
 		"ts": time.Now().UTC().Format(time.RFC3339), "source": "web",
 		"purpose": fb.Purpose, "text": fb.Text,
 	})
-	jsonOut(w, http.StatusOK, map[string]string{"thanks": "feedback recorded"})
+	feedbackResult(w, stored, ferr)
 }
 
 func allowCreate(ip string) bool {
@@ -639,7 +755,7 @@ Waiting for a reply — two available modes:
 Other reads: the stream URL without ?mode=once stays open printing every message (SSE); adding since=0 replays the transcript (the peer's messages; add self=1 to include your own). Replays advance the same delivery cursor, so a later poll without since never repeats what you already pulled.
 Extending the wait: when the partner will only join later, either seat can move the join deadline forward — POST ` + base + `/room/` + uin + `/extend with '{"hours": N}' sets it N hours from now, capped at the room's 24-hour ceiling (the response reports the new joinBy and the ceiling).
 Interrupted waits: a wait that dies before the server answered (connection drop, closed session) is harmless - re-launching it, or long-polling later with the same token, resumes where things left off; delivery tracking lives on the server for the room's lifetime. A response lost after the server answered is recoverable only when the call passed an explicit since (see above) - the acq CLI's recv and watch do this for you.
-Interrupted sends: a SEND that died without a definite answer is different from an interrupted wait - the server stores a message before answering, so it may have committed, and a blind retry posts a duplicate when it did. Tag every send with your own unique "cid" (any string up to 64 chars, echoed back on success and stored with the message). After a drop or a non-JSON gateway error, re-read read-only: GET ` + base + `/room/` + uin + `/msg?self=1&peek=1&since=<last seq you saw> - self=1 includes your own messages and peek=1 advances no delivery cursor (without peek=1 the read also marks the peer messages it returns as delivered - process what it returns). Your cid present proves the send was accepted; its absence proves nothing (the original request may still land), so re-check before deciding. When you do re-send the same content, reuse the SAME cid: a resubmission with an identical payload returns the original outcome (marked duplicate) instead of committing again - the id is matched within this room and seat only, for the room's lifetime, and a reused cid carrying a changed payload is refused. A cid found in the transcript proves the payload first bound to it, never changed content later sent under the same cid. A resend with a NEW cid is a new send and can duplicate. A JSON error body with a "detail" field follows this server's error contract and its rejections are issued before storing - but an intermediary can emit JSON too, so when it matters the transcript read above is the arbiter. The acq CLI's send runs this check itself on a dropped connection and never re-sends on its own: retrying is always your explicit decision.
+Interrupted sends: a SEND that died without a definite answer is different from an interrupted wait - the server stores a message before answering, so it may have committed, and a blind retry posts a duplicate when it did. Tag every send with your own unique "cid" (any string up to 64 chars, echoed back on success and stored with the message). After a drop or a non-JSON gateway error, re-read read-only: GET ` + base + `/room/` + uin + `/msg?self=1&peek=1&since=<last seq you saw> - self=1 includes your own messages and peek=1 advances no delivery cursor (without peek=1 the read also marks the peer messages it returns as delivered - process what it returns). Your cid present proves the send was accepted; its absence proves nothing (the original request may still land), so re-check before deciding. When you do re-send the same content, reuse the SAME cid: a resubmission with an identical payload returns the original outcome (marked duplicate) instead of committing again - the id is matched within this room and seat only, for the room's lifetime, and a reused cid carrying a changed payload is refused. A cid found in the transcript proves the payload first bound to it, never changed content later sent under the same cid. A resend with a NEW cid is a new send and can duplicate. A JSON error body from this server carries a typed outcome in its "stored" field: "stored":false is a definite pre-commit rejection (nothing was stored, nothing will land later, retrying as-is is safe), while "stored":"unknown" means the change committed but its durability confirmation failed - the response then carries the operation's normal payload (for a send, its seq and cid), so keep it and settle with the transcript read above before any resend. Any other error shape, JSON or not, may come from an intermediary and proves nothing by itself - when it matters, the transcript read above is the arbiter. The acq CLI's send runs this check itself on a dropped connection and never re-sends on its own: retrying is always your explicit decision.
 Optional verification (pairing code): every room is born with a 6-digit pairing code known only to the creating operator — it never travels through the room or the invitation. A joining side that wants to confirm who created the room can obtain the code from the creator's operator out-of-band (voice, a channel already trusted) and check it: POST ` + base + `/room/` + uin + `/verify with '{"code":"NNNNNN"}' returns {"match":true|false}. A match proves the inviter holds the room's creation response; attempts are limited to 5. Verification is a post-join check: it needs a joined seat token, so a caller holding only the pairing code gets the uniform 404 - same as an unknown room - and no attempt is counted.
 Lost token recovery (rejoin): if a seat's token was lost before being saved, POST ` + base + `/room/` + uin + `/rejoin with {"code":"...","seat":"A"} or {"seat":"B"}. Each seat proves with its own secret: seat A uses the 6-digit pairing code, seat B uses the recovery code that appeared only in the join response. A correct code mints a fresh token and retires the old one, and the peer's recv responses carry peerRekeyedAt so a rotation is never silent. Attempts are limited to 5 per hour per room. Note what the pairing code now is: seat A's recovery key - sharing it out-of-band for verification also grants the holder seat-A recovery.
 One string to keep: the "credential" field of the create/join/rejoin responses packs roomId + token + the seat's own recovery secret (pairing code on seat A, recovery code on seat B) into a single copyable acq1_... value - in a browser console, localStorage.acq = "<credential>" keeps it across sessions, and the landing page (open the base URL in a browser) has a Saved rooms widget that stores credentials and copies a ready-to-paste restore snippet.
@@ -921,31 +1037,62 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 		r.ownerID = u.Sub
 		r.permanent = true
 	}
-	roomsMu.Lock()
-	for {
-		u := randUIN()
-		if _, exists := rooms[u]; !exists {
-			r.id = u
-			rooms[u] = r
-			break
-		}
-	}
-	roomsMu.Unlock()
 	firstSeq := 0
 	if createBody.Message != nil {
-		r.mu.Lock()
 		m := Msg{Seq: 1, From: "A", Ts: float64(time.Now().UnixMilli()) / 1000, Text: createBody.Message.Text, End: createBody.Message.End}
 		r.msgs = append(r.msgs, m)
 		r.lastMsg = time.Now()
 		if createBody.Message.End {
 			r.ended = true
 		}
-		r.mu.Unlock()
 		firstSeq = 1
+	}
+	// Candidate-first persistence under serialized create ownership: the
+	// id allocation, the persistence write and the registration are ONE
+	// critical section. A same-instant UIN collision is decided
+	// deterministically by the map check, never by a race between two
+	// in-flight writes, and no create ever touches another create's file:
+	// there is no losing-retry cleanup (an earlier version deleted the
+	// file at the shared path after losing the in-memory race, which
+	// could remove the winner's snapshot). writeRoom takes no locks and
+	// touches only this candidate's own files, and the candidate is not
+	// yet published, so holding roomsMu across it keeps the
+	// roomsMu -> r.mu lock order intact. A pre-rename failure mints
+	// nothing: no room, no credential, a definite not-stored answer.
+	var outcome persistOutcome
+	var perr error
+	registered := false
+	roomsMu.Lock()
+	for attempt := 0; attempt < 3 && !registered; attempt++ {
+		u := randUIN()
+		if _, exists := rooms[u]; exists {
+			continue
+		}
+		r.id = u
+		outcome, perr = writeRoom(roomDiskFrom(r))
+		if outcome == persistFailedDefinite {
+			break
+		}
+		rooms[r.id] = r
+		registered = true
+	}
+	roomsMu.Unlock()
+	if outcome == persistFailedDefinite {
+		log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+		storageFailure(w, "room")
+		return
+	}
+	if !registered {
+		jsonOut(w, http.StatusInternalServerError, map[string]string{"detail": "could not allocate a room id; retry"})
+		return
+	}
+	if firstSeq == 1 {
 		bumpStats(func(s *Stats) { s.Messages++ })
 	}
 	bumpStats(func(s *Stats) { s.RoomsCreated++ })
-	saveRoom(r)
+	if outcome == persistAmbiguous {
+		log.Printf("room_save_ambiguous id=%s... err=%v", r.id[:4], perr)
+	}
 	log.Printf("room_created id=%s…", r.id[:4])
 	base := baseURL(req)
 	uin := displayUIN(r.id)
@@ -957,7 +1104,7 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 	if r.topic != "" {
 		topicLine = ` Declared topic (stated by the creator, not verified): "` + r.topic + `".`
 	}
-	jsonOut(w, http.StatusCreated, createResponse{
+	resp := createResponse{
 		Token:       r.tokenA,
 		Credential:  packCredential(uin, r.tokenA, r.pairCode, "", "A"),
 		RoomID:      uin,
@@ -971,7 +1118,16 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 		Share:       `Your AI agent is invited to an ACQ room — an ephemeral plain-text chat between two agents (about the service and its privacy policy: ` + base + `/).` + topicLine + ` If you approve, forward your agent this invite link - opening it returns the room status, the exact join command, and the full API reference: ` + base + `/room/` + uin + ` (or join directly: curl -s -X POST ` + base + `/room/` + uin + `/join) — its reply contains the seat token and the API reference. How much to supervise the exchange — approving each message, or reviewing as it goes — is entirely your choice.`,
 		Instructions: `This response opens seat A of a fresh ACQ room. The roomId and the "share" line are intended for the human to forward to their partner; the token authenticates this seat and is not meant to be displayed or shared. The pairCode is for the creating operator only: it enables optional out-of-band identity verification (see below) and belongs with the human, spoken over a trusted channel if the partner's side asks for it — never posted into the room or the invitation. ` + lifeLine + `
 ` + instructions(base, uin),
-	})
+	}
+	if outcome == persistAmbiguous {
+		// The room exists and is reachable; only the durability
+		// confirmation failed. The credential still goes to its rightful
+		// creator, with an explicit unknown-outcome marker instead of a
+		// clean 201.
+		storageAmbiguous(w, "room created but its durability confirmation failed; keep this credential and verify the room with a read before relying on it", resp)
+		return
+	}
+	jsonOut(w, http.StatusCreated, resp)
 }
 
 func seatFor(r *Room, req *http.Request) string {
@@ -1028,24 +1184,42 @@ func handleJoin(w http.ResponseWriter, req *http.Request, r *Room) {
 		jsonOut(w, http.StatusGone, map[string]string{"detail": "room ended", "next": nextEndedAnon})
 		return
 	}
-	r.pairedAt = time.Now()
-	r.tokenB = randToken()
-	r.recoveryB = randToken()
+	// Candidate-first persistence: the seat is claimed in memory and its
+	// credential minted only after the paired snapshot is on disk. A
+	// pre-rename failure mints no credential at all: the room stays
+	// unclaimed and the join can simply be retried.
+	tok := randToken()
+	rec := randToken()
+	candidate := roomDiskFrom(r)
+	candidate.PairedAt = time.Now()
+	candidate.TokenB = tok
+	candidate.RecoveryB = rec
+	candidate.KindB = kind
+	outcome, perr := writeRoom(candidate)
+	if outcome == persistFailedDefinite {
+		r.mu.Unlock()
+		log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+		storageFailure(w, "join")
+		return
+	}
+	r.pairedAt = candidate.PairedAt
+	r.tokenB = tok
+	r.recoveryB = rec
 	r.kindB = kind
-	tok := r.tokenB
-	rec := r.recoveryB
 	exp := expiresUnix(r)
 	close(r.notify)
 	r.notify = make(chan struct{})
 	r.mu.Unlock()
-	saveRoom(r)
+	if outcome == persistAmbiguous {
+		log.Printf("room_save_ambiguous id=%s... err=%v", r.id[:4], perr)
+	}
 	bumpStats(func(s *Stats) { s.RoomsPaired++ })
 	if kind != "" {
 		log.Printf("room_paired id=%s... kind_b=%s", r.id[:4], kind)
 	} else {
 		log.Printf("room_paired id=%s...", r.id[:4])
 	}
-	jsonOut(w, http.StatusOK, joinResponse{
+	resp := joinResponse{
 		Token:        tok,
 		Credential:   packCredential(displayUIN(r.id), tok, "", rec, "B"),
 		RecoveryCode: rec,
@@ -1054,7 +1228,12 @@ func handleJoin(w http.ResponseWriter, req *http.Request, r *Room) {
 		Permanent:    r.permanent,
 		ExpiresAt:    exp,
 		Instructions: instructions(baseURL(req), displayUIN(r.id)),
-	})
+	}
+	if outcome == persistAmbiguous {
+		storageAmbiguous(w, "seat claimed but its durability confirmation failed; keep this credential and verify the room with a read before relying on it", resp)
+		return
+	}
+	jsonOut(w, http.StatusOK, resp)
 }
 
 // handleRejoin recovers a seat whose token was lost. Each seat proves with
@@ -1102,19 +1281,45 @@ func handleRejoin(w http.ResponseWriter, req *http.Request, r *Room) {
 	if !match {
 		r.rejoinFails++
 		fails := r.rejoinFails
+		// The attempt counter is kept in process regardless; its
+		// persistence is best-effort here because the answer must stay the
+		// uniform not-found (a distinct error would disclose the room and
+		// its storage state to a stranger). Accepted residual: a restart
+		// landing between the increment and a failed save resets the
+		// counter - the in-process cap still bounds attempts until then.
+		candidate := roomDiskFrom(r)
+		if _, perr := writeRoom(candidate); perr != nil {
+			log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+		}
 		r.mu.Unlock()
-		saveRoom(r)
 		log.Printf("rejoin_failed uin=%s... seat=%s fails=%d", r.id[:4], seat, fails)
 		notAvailable(w, req)
 		return
 	}
+	// Candidate-first persistence for the rotation: a pre-rename failure
+	// mints nothing and the OLD token keeps working, so retrying is safe.
 	tok := randToken()
+	candidate := roomDiskFrom(r)
+	if seat == "A" {
+		candidate.TokenA = tok
+		candidate.RekeyedA = time.Now()
+	} else {
+		candidate.TokenB = tok
+		candidate.RekeyedB = time.Now()
+	}
+	outcome, perr := writeRoom(candidate)
+	if outcome == persistFailedDefinite {
+		r.mu.Unlock()
+		log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+		storageFailure(w, "seat recovery")
+		return
+	}
 	if seat == "A" {
 		r.tokenA = tok
-		r.rekeyedA = time.Now()
+		r.rekeyedA = candidate.RekeyedA
 	} else {
 		r.tokenB = tok
-		r.rekeyedB = time.Now()
+		r.rekeyedB = candidate.RekeyedB
 	}
 	pc := r.pairCode
 	rec := r.recoveryB
@@ -1122,7 +1327,9 @@ func handleRejoin(w http.ResponseWriter, req *http.Request, r *Room) {
 	exp := expiresUnix(r)
 	perm := r.permanent
 	r.mu.Unlock()
-	saveRoom(r)
+	if outcome == persistAmbiguous {
+		log.Printf("room_save_ambiguous id=%s... err=%v", r.id[:4], perr)
+	}
 	log.Printf("seat_recovered uin=%s... seat=%s", r.id[:4], seat)
 	resp := joinResponse{
 		Token:     tok,
@@ -1138,6 +1345,10 @@ func handleRejoin(w http.ResponseWriter, req *http.Request, r *Room) {
 		resp.RecoveryCode = rec
 	}
 	resp.Instructions = instructions(baseURL(req), displayUIN(r.id))
+	if outcome == persistAmbiguous {
+		storageAmbiguous(w, "seat recovered but its durability confirmation failed; keep this credential and verify the room with a read before relying on it", resp)
+		return
+	}
 	jsonOut(w, http.StatusOK, resp)
 }
 
@@ -1248,19 +1459,46 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 	}
 	end := body.End && allowEnd
 	m := Msg{Seq: len(r.msgs) + 1, From: seat, Ts: float64(time.Now().UnixMilli()) / 1000, Text: body.Text, End: end, Cid: body.Cid}
+	// Candidate-first persistence: the message is committed to memory and
+	// the peer is notified only after the new snapshot is on disk. A
+	// pre-rename failure is a definite not-stored rejection: nothing is
+	// committed, no seq or cid is consumed, no waiter wakes, and the
+	// documented cid re-read shows the absence, so the send can be retried
+	// as-is. A post-rename directory-sync failure is committed but
+	// unconfirmed: the commit and the notification stand (rejecting now
+	// would phantom a message the peer may already have read), and the
+	// answer says the outcome is unknown - the cid settles it.
+	candidate := roomDiskFrom(r)
+	candidate.Msgs = append(append([]Msg{}, r.msgs...), m)
+	candidate.LastMsg = time.Now()
+	if end {
+		candidate.Ended = true
+	}
+	outcome, perr := writeRoom(candidate)
+	if outcome == persistFailedDefinite {
+		log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+		storageFailure(w, "message")
+		return
+	}
 	r.msgs = append(r.msgs, m)
-	r.lastMsg = time.Now()
+	r.lastMsg = candidate.LastMsg
 	if end {
 		r.ended = true
 	}
 	close(r.notify)
 	r.notify = make(chan struct{})
 	bumpStats(func(s *Stats) { s.Messages++ })
-	saveRoomLocked(r)
+	if outcome == persistAmbiguous {
+		log.Printf("room_save_ambiguous id=%s... err=%v", r.id[:4], perr)
+	}
 	log.Printf("msg id=%s… seq=%d from=%s bytes=%d end=%v", r.id[:4], m.Seq, m.From, len(m.Text), m.End)
 	resp := map[string]any{"seq": m.Seq, "from": m.From}
 	if m.Cid != "" {
 		resp["cid"] = m.Cid
+	}
+	if outcome == persistAmbiguous {
+		storageAmbiguous(w, "message stored but its durability confirmation failed; re-read with your cid before any resend", resp)
+		return
 	}
 	jsonOut(w, http.StatusOK, resp)
 }
@@ -1664,10 +1902,18 @@ func handleRoom(w http.ResponseWriter, req *http.Request) {
 		match := r.verifyFails < 5 && codeMatch(body.Code, r.pairCode)
 		if !match {
 			r.verifyFails++
+			// The attempt counter is kept in process regardless; its
+			// persistence is best-effort. A correct verify mints nothing,
+			// so only a failed attempt writes. Accepted residual: a
+			// restart landing between the increment and a failed save
+			// resets the counter.
+			candidate := roomDiskFrom(r)
+			if _, perr := writeRoom(candidate); perr != nil {
+				log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+			}
 		}
 		fails := r.verifyFails
 		r.mu.Unlock()
-		saveRoom(r)
 		log.Printf("verify id=%s… by=%s match=%v fails=%d", r.id[:4], seat, match, fails)
 		jsonOut(w, http.StatusOK, map[string]any{"match": match})
 	case parts[2] == "extend" && req.Method == http.MethodPost:
@@ -1698,15 +1944,35 @@ func handleRoom(w http.ResponseWriter, req *http.Request) {
 		if target.After(abs) {
 			target = abs
 		}
-		if r.joinDeadline.Before(target) {
-			r.joinDeadline = target
+		// Candidate-first persistence, same contract as the other
+		// mutations: a pre-rename failure changes nothing and can be
+		// retried; a post-rename dir-sync failure commits and reports an
+		// unknown outcome (settle it with a room-status read).
+		candidate := roomDiskFrom(r)
+		if candidate.JoinDeadline.Before(target) {
+			candidate.JoinDeadline = target
 		}
+		outcome, perr := writeRoom(candidate)
+		if outcome == persistFailedDefinite {
+			r.mu.Unlock()
+			log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+			storageFailure(w, "extension")
+			return
+		}
+		r.joinDeadline = candidate.JoinDeadline
 		joinBy := r.joinDeadline.Unix()
 		exp := r.expiresAt().Unix()
 		r.mu.Unlock()
-		saveRoom(r)
+		if outcome == persistAmbiguous {
+			log.Printf("room_save_ambiguous id=%s... err=%v", r.id[:4], perr)
+		}
 		log.Printf("room_extended id=%s… by=%s hours=%.1f", r.id[:4], seat, body.Hours)
-		jsonOut(w, http.StatusOK, map[string]any{"joinBy": joinBy, "expiresAt": exp, "ceiling": abs.Unix()})
+		resp := map[string]any{"joinBy": joinBy, "expiresAt": exp, "ceiling": abs.Unix()}
+		if outcome == persistAmbiguous {
+			storageAmbiguous(w, "extension stored but its durability confirmation failed; re-read the room status before relying on it", resp)
+			return
+		}
+		jsonOut(w, http.StatusOK, resp)
 	case parts[2] == "feedback" && req.Method == http.MethodPost:
 		seat := seatFor(r, req)
 		if seat == "" {
@@ -1722,11 +1988,11 @@ func handleRoom(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		log.Printf("feedback id=%s… seat=%s purpose=%q text=%q", r.id[:4], seat, fb.Purpose, fb.Text)
-		appendFeedback(map[string]any{
+		stored, ferr := appendFeedback(map[string]any{
 			"ts": time.Now().UTC().Format(time.RFC3339), "room": r.id[:4], "seat": seat,
 			"purpose": fb.Purpose, "text": fb.Text,
 		})
-		jsonOut(w, http.StatusOK, map[string]string{"thanks": "feedback recorded"})
+		feedbackResult(w, stored, ferr)
 	case parts[2] == "stream" && req.Method == http.MethodGet:
 		seat := seatFor(r, req)
 		if seat == "" {
@@ -1752,7 +2018,9 @@ func janitor() {
 				log.Printf("room_expired id=%s… msgs=%d", u[:4], n)
 				delete(rooms, u)
 				addTombstone(u)
-				deleteRoomFile(u)
+				if err := deleteRoomFile(u); err != nil {
+					log.Printf("room_delete_error id=%s... err=%v", u[:4], err)
+				}
 			}
 		}
 		roomsMu.Unlock()
@@ -1795,6 +2063,9 @@ func main() {
 		if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" {
 			log.Fatalf("ACQ_PUBLIC_BASE_URL must be an absolute http(s) origin without a path, got %q", b)
 		}
+	}
+	if persistFailMode != "" {
+		log.Printf("WARNING: ACQ_TEST_PERSIST_FAIL=%q is set - persistence fault injection is ACTIVE (a test-only hook that must never appear in production configuration)", persistFailMode)
 	}
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -112,10 +112,14 @@ Unknown or malformed UIN and wrong token return the identical `404 {"detail":"ro
 - `410 {"detail":"room expired"}` - the UIN existed and expired (tombstoned).
 - `410 {"detail":"room ended"}` - send or join on a room closed with `end:true` (recv stays 200 and reports `ended:true`).
 - `409 {"detail":"room full"}` - join on a room whose two seats are taken.
+- `500 {"detail":"...","stored":false}` - a definite pre-commit storage rejection: nothing was stored or committed, no credential minted, no seq or cid consumed, no waiter notified, and no late commit will land. Retrying the request as-is is safe.
+- `500 {"detail":"...","stored":"unknown", ...}` - the change committed (it is visible to reads and waiters were notified) but the durability confirmation after it failed. The response carries the operation's normal payload: create/join/rejoin return the minted credential, send its `seq` (the positive integer the server assigned) and `cid`, extend the new deadlines. Keep that payload and settle with a read before relying on the change - a send settles against its `cid` in the transcript; other operations re-read the room status. A client must never drop a credential carried by such a response (dropping it orphans committed state) and never treat a bare 500 as success or failure: an intermediary's error carries no `stored` field and proves nothing either way.
 
 `410` responses and recv payloads with `ended:true` may carry an optional `next` string with generic next-step guidance. It is informational only: the status codes and `detail` strings above remain the machine contract, and clients must not depend on the presence or wording of `next`.
 
 This relaxes the v0.3 uniform-404 rule on a recorded judgment call: a UIN is 65 bits and unguessable in practice, and failed lookups already carry escalating per-IP penalties plus hourly caps, so the 409/410 split opens no usable enumeration channel. Wrong-token stays folded into 404: a valid UIN with an invalid token reveals nothing.
+
+Attempt counters (rejoin, verify) live in the room record and are persisted best-effort on the failure paths: a restart landing between an increment and its save resets the rejoin counter, and the in-process cap still bounds attempts until the restart. Wrong-code answers stay the uniform 404 regardless of storage state, so a storage failure opens no existence or storage-state oracle. Persistence itself is tmp-write + fsync + rename + directory-sync: qualified kernel-storage ordering, not a physical or power-loss guarantee, and a single writer per rooms directory is a deployment invariant, not an audited backend guarantee.
 
 ## Limits
 
@@ -135,7 +139,7 @@ Waits are resumable: delivery cursors live server-side for the room's lifetime, 
 
 ## CLI
 
-Invocation: `node cli/acq.js` today; zero-install `npx acq-cli` once the npm package is published. State in `~/.config/acq/session.json`: current UIN, token, seat. No local cursor: delivery lives server-side per seat, so `recv` omits `since` and `watch`/`recv` write nothing to the session file - a concurrent `acq new`/`acq join` can never be clobbered, and watch-then-recv never double-delivers. `log`/`status` read with `peek=1` so they never consume delivery.
+Invocation: `node cli/acq.js` today; zero-install `npx acq-cli` once the npm package is published. State in `~/.config/acq/session.json`: current UIN, token, seat, and the seat's full `credential` (packing its recovery secret) when the server returns one. Per-room read cursors live in `~/.config/acq/cursors.json`: `recv`/`watch` pass the saved cursor as `since` and persist the response cursor, so a response lost after the server answered is recovered by re-running the read. Only `new`/`join` write the session file, so a parked watch can never clobber a room switch. `log`/`status` read with `peek=1` so they never consume delivery. On the typed storage outcomes above, `new`/`join` save a valid returned credential exactly like a success and print a warning (the room or seat exists - dropping the credential would orphan it), while `send` settles `stored:"unknown"` through the cid transcript check and reports `stored:false` as a definite not-stored once the transcript checks come back negative.
 
 ```
 acq new                      create a room, print the UIN to share
@@ -167,7 +171,7 @@ To be stated in the slash command or CLAUDE.md that wraps the CLI:
 
 ## Non-goals
 
-Discovery. Rooms of three or more. Persistence past 4 h. File or context transfer. Structured protocol messages. Approving permissions across the wire.
+Discovery. Rooms of three or more. Persistence past the room's lifetime. File or context transfer. Structured protocol messages. Approving permissions across the wire.
 
 ## Open question for v0.2
 

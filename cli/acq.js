@@ -184,6 +184,69 @@ function parseArgs(argv) {
   return { args, opts };
 }
 
+// Mutation calls that mint state (new/join) get typed-outcome handling
+// instead of api()'s fail-fast: the server types its storage failures in
+// the "stored" field. kind "definite" (stored:false) is a pre-commit
+// rejection - nothing exists, retrying as-is is safe. kind "committed"
+// (stored:"unknown" with a payload that validates against the operation)
+// means the room or seat EXISTS: the credential in the payload must be
+// kept, never dropped - dropping it orphans committed state. Anything
+// else on a 5xx, and any answer with no usable payload, is honestly
+// unknown - never blanket-treated as either success or failure.
+async function apiMut(method, path, { token, body, validate } = {}) {
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body) headers["Content-Type"] = "application/json";
+  let res;
+  try {
+    res = await fetch(BASE + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  } catch {
+    return { kind: "no-answer" };
+  }
+  const data = await res.json().catch(() => null);
+  if (res.ok && data) {
+    if (validate(data)) return { kind: "ok", data };
+    return { kind: "unknown", status: res.status, detail: "the answer carried no usable payload" };
+  }
+  const detail = data && typeof data.detail === "string" ? data.detail : "request failed";
+  if (data && data.stored === false) return { kind: "definite", status: res.status, detail };
+  if (data && data.stored === "unknown" && validate(data)) return { kind: "committed", status: res.status, data, detail };
+  if (res.status >= 500) return { kind: "unknown", status: res.status, detail };
+  return { kind: "error", status: res.status, detail };
+}
+const isStr = v => typeof v === "string" && v.length > 0;
+const normUin = s => (s || "").toUpperCase().replace(/[-\s]/g, "");
+// A credential packs {uin, token, ...}: decode it so a returned credential
+// can be bound to the room it claims to seat - a mismatched or
+// undecodable one is no answer at all, never a credential to save.
+function decodeCred(blob) {
+  if (!isStr(blob) || !blob.startsWith("acq1_")) return null;
+  try {
+    const c = JSON.parse(Buffer.from(blob.slice(5), "base64url").toString("utf8"));
+    return isStr(c.uin) && isStr(c.token) ? c : null;
+  } catch { return null; }
+}
+// Binding checks: the fields the CLI actually saves, and when a credential
+// is present its decoded UIN must BE the room in play - for create that is
+// the answer's own roomId, for join the room that was asked for. The
+// credential is saved when present but not required: the server always
+// sends it, and a room stays usable without it.
+const validCreate = d => {
+  if (!isStr(d.roomId) || !isStr(d.token)) return false;
+  if (d.credential === undefined) return true;
+  const c = decodeCred(d.credential);
+  return !!c && normUin(c.uin) === normUin(d.roomId);
+};
+const validJoin = (d, uin) => {
+  if (d.credential !== undefined) {
+    // An ambiguous join answer may carry ONLY the credential: the decoded
+    // UIN must then BE the room asked for, and its token becomes the seat.
+    const c = decodeCred(d.credential);
+    return !!c && normUin(c.uin) === normUin(uin);
+  }
+  return isStr(d.token);
+};
+
 async function api(method, path, { token, body } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -209,27 +272,54 @@ const room = opts.room || state.room;
 
 switch (cmd) {
   case "new": {
-    const d = await api("POST", "/room");
-    saveState({ room: d.roomId, token: d.token, seat: "A" });
-    seedCursor(d.roomId);
-    // The join window is the server's to set: print what the response's
-    // joinBy actually grants rather than a hardcoded number that can drift
-    // from the real deadline (the server grants 2 hours unclaimed; this
-    // text once said 10 minutes). No usable joinBy, no time claim at all.
-    const joinMins = typeof d.joinBy === "number" && Number.isFinite(d.joinBy) ? Math.max(0, Math.round((d.joinBy * 1000 - Date.now()) / 60000)) : null;
-    const win = joinMins === null ? "one join" : `one join within ~${joinMins} min`;
-    console.log(`Room created. Share this UIN (${win}):\n\n  ${d.roomId}\n`);
-    console.log(`Then run: acq recv --wait 120`);
-    break;
+    const r = await apiMut("POST", "/room", { validate: validCreate });
+    if (r.kind === "ok" || r.kind === "committed") {
+      const d = r.data;
+      saveState({ room: d.roomId, token: d.token, seat: "A", ...(isStr(d.credential) ? { credential: d.credential } : {}) });
+      seedCursor(d.roomId);
+      // The join window is the server's to set: print what the response's
+      // joinBy actually grants rather than a hardcoded number that can drift
+      // from the real deadline (the server grants 2 hours unclaimed; this
+      // text once said 10 minutes). No usable joinBy, no time claim at all.
+      const joinMins = typeof d.joinBy === "number" && Number.isFinite(d.joinBy) ? Math.max(0, Math.round((d.joinBy * 1000 - Date.now()) / 60000)) : null;
+      const win = joinMins === null ? "one join" : `one join within ~${joinMins} min`;
+      console.log(`Room created. Share this UIN (${win}):\n\n  ${d.roomId}\n`);
+      console.log(`Then run: acq recv --wait 120`);
+      if (r.kind === "committed") console.error(`warning: the room was created but the server could not confirm durable storage (it answered ${r.status} with stored:"unknown"). Your seat and recovery secret are saved locally and the room is usable; if the server loses its write across a restart the room may vanish - verify with 'acq status' before relying on it.`);
+      break;
+    }
+    if (r.kind === "definite" || r.kind === "error") {
+      console.error(`error ${r.status}: ${r.detail}`);
+      process.exit(1);
+    }
+    // no-answer / unknown: the room may exist, but no usable credential
+    // reached this machine - it cannot be reclaimed.
+    console.error(`room creation outcome unknown${r.status ? ` (error ${r.status})` : ""} - if a room was created, its credential never reached this machine and cannot be reclaimed; an unclaimed room expires on its own. Create a fresh room.`);
+    process.exit(1);
   }
   case "join": {
     const uin = joinArgToUin(args[1]);
     if (!uin) { console.error("usage: acq join <uin-or-invite-link>"); process.exit(1); }
-    const d = await api("POST", `/room/${uin}/join`);
-    saveState({ room: uin, token: d.token, seat: "B" });
-    seedCursor(uin);
-    console.log(`Joined room ${uin}. ${fmtTime(d.expiresAt)}.`);
-    break;
+    const r = await apiMut("POST", `/room/${uin}/join`, { validate: d => validJoin(d, uin) });
+    if (r.kind === "ok" || r.kind === "committed") {
+      // An ambiguous (committed) answer can carry the seat token only
+      // inside the credential - take it from there when the top level
+      // has none, so the saved session is actually usable.
+      const cred = decodeCred(r.data.credential);
+      saveState({ room: uin, token: isStr(r.data.token) ? r.data.token : (cred ? cred.token : undefined), seat: "B", ...(isStr(r.data.credential) ? { credential: r.data.credential } : {}) });
+      seedCursor(uin);
+      console.log(`Joined room ${uin}. ${fmtTime(r.data.expiresAt)}.`);
+      if (r.kind === "committed") console.error(`warning: your seat was claimed but the server could not confirm durable storage (it answered ${r.status} with stored:"unknown"). Your token and recovery secret are saved locally; if the server loses its write across a restart, re-enter with the recovery code in the saved credential.`);
+      break;
+    }
+    if (r.kind === "definite" || r.kind === "error") {
+      console.error(`error ${r.status}: ${r.detail}`);
+      process.exit(1);
+    }
+    // no-answer / unknown: the seat may be claimed, but no usable
+    // credential reached this machine - it cannot be reclaimed from here.
+    console.error(`join outcome unknown${r.status ? ` (error ${r.status})` : ""} - the seat may or may not be claimed. One retry is safe while the seat is free; if it answers \"room full\", your earlier join committed but its credential never arrived, and the seat cannot be reclaimed without the recovery code from that lost answer.`);
+    process.exit(1);
   }
   case "send": {
     const text = args[1];
@@ -247,22 +337,24 @@ switch (cmd) {
     } catch {
       res = null; // transport failure: no answer at all
     }
-    // A JSON error body with a detail field comes from the ACQ server itself,
-    // whose rejections all precede storing the message: a definite answer.
-    // Anything else (socket drop, timeout, a proxy's non-JSON 502) leaves the
-    // outcome ambiguous: the server stores before answering, so the message
-    // may have committed.
     // Any answer that is not a clean success leaves the outcome to the cid
     // check - including a 2xx whose body is truncated or unparseable: the
     // server commits BEFORE writing its answer, so a cut body means the
-    // message may well be stored. Likewise a JSON detail body is this
-    // server's error SHAPE, but shape cannot establish where the answer
-    // came from or that nothing was stored. The received answer is kept
-    // for reporting; the transcript check is the only arbiter.
-    let received = null;
+    // message may well be stored. A JSON error from this server carries a
+    // typed outcome in its "stored" field: false is a definite pre-commit
+    // rejection (nothing stored, no late commit possible), "unknown" means
+    // committed-but-durability-unconfirmed and the body then carries the
+    // send's seq and cid - trusted only when the EXACT cid of this request
+    // and a valid positive-integer seq bind the answer to it (a
+    // malformed or incompatible body is no binding and is ignored).
+    // Typed or not, the transcript check below stays the arbiter; the
+    // typed field only sharpens how a negative outcome is reported.
+    let received = null, typed = null;
     if (res && !res.ok) {
       const data = await res.json().catch(() => ({}));
       received = `error ${res.status}: ${typeof data.detail === "string" ? data.detail : "request failed"}`;
+      if (data.stored === false) typed = "definite";
+      else if (data.stored === "unknown" && data.cid === cid && Number.isSafeInteger(data.seq) && data.seq >= 1) typed = "unknown";
       res = null;
     }
     let d = null;
@@ -292,6 +384,10 @@ switch (cmd) {
           console.log(`sent seq=${hit.seq} (verified after an ambiguous failure)`);
           process.exit(0);
         }
+      }
+      if (received && typed === "definite") {
+        console.error(`${received} - the server typed this a definite pre-commit rejection and repeated transcript checks are negative (id ${cid}): the message was not stored and re-sending as-is is safe. If the answer came from an intermediary rather than the server, the original may still land - when it matters, re-check with 'acq log --self'.`);
+        process.exit(1);
       }
       if (received) {
         console.error(`${received} - but whether the request was stored is unconfirmed (id ${cid}); repeated transcript checks are negative. The answer may not have come from the ACQ server itself: re-check with 'acq log --self' before deciding; re-sending risks a duplicate if the original lands.`);
