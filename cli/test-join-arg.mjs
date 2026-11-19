@@ -30,11 +30,33 @@ const sessPath = home => join(home, ".config", "acq", "session.json");
 // answers a fixed seat-B payload. It deliberately does NO UIN normalization
 // of its own, so the path it records is exactly what the CLI sent.
 const seen = [];
+// newMode steers how POST /new answers; join answers typed ambiguous
+// failures for the AMBOK/AMBBAD marker rooms. A credential is
+// "acq1_" + base64url(JSON{uin, token, ...}) - the format the validator
+// binds against the room in play.
+let newMode = "ok"; // ok | bound | mismatch
+const credFor = (uin, token) =>
+  "acq1_" + Buffer.from(JSON.stringify({ uin, token, recovery: "REC-9", seat: "B" })).toString("base64url");
 function startStub() {
   const srv = createServer((req, res) => {
     seen.push(req.url);
+    if (req.method === "POST" && req.url === "/room" && newMode !== "ok") {
+      const roomId = "ZROOM-AAAAA-AAAAA";
+      const credUin = newMode === "bound" ? roomId : "OTHER-AAAAA-AAAAA";
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ detail: "created, but the copy cannot be confirmed; it may be deleted when the server restarts", stored: "unknown", roomId, token: "tokA", expiresAt: Date.now() / 1000 + 86400, joinBy: Date.now() / 1000 + 7200, credential: credFor(credUin, "tokA") }));
+      return;
+    }
     const known = /^\/room\/[^/]+\/join$/.test(req.url) && !req.url.startsWith("/room/world/");
-    if (req.method === "POST" && known) {
+    if (req.method === "POST" && known && /^\/room\/ambok/i.test(req.url)) {
+      // Ambiguous join whose credential binds to the room asked for.
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ detail: "joined, but the copy cannot be confirmed; the seat IS claimed", stored: "unknown", credential: credFor("AMBOK-AAAAA-AAAAA", "tokB"), expiresAt: Date.now() / 1000 + 86400 }));
+    } else if (req.method === "POST" && known && /^\/room\/ambbad/i.test(req.url)) {
+      // Ambiguous join whose credential decodes to a DIFFERENT room.
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ detail: "joined, but the copy cannot be confirmed; the seat IS claimed", stored: "unknown", credential: credFor("OTHER-AAAAA-AAAAA", "tokB") }));
+    } else if (req.method === "POST" && known) {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ token: "tokB", expiresAt: Date.now() + 86400000 }));
     } else {
@@ -139,6 +161,49 @@ await joinCase("link ending /join", `https://acq.damri.org/room/${UIN}/join`, `/
   check("no argument: usage error, zero requests",
     r.code !== 0 && /usage/.test(r.err) && seen.length === before,
     `code=${r.code} err=${r.err.trim()} reqs=${seen.length - before}`);
+}
+// 12. Typed ambiguous join (500 stored:"unknown") whose credential
+// decodes to THIS room: seated from the credential, exit 0, saved.
+{
+  const home = makeHome();
+  const r = await runCli(home, base, ["join", "ambok-aaaaa-aaaaa"]);
+  check("ambiguous join + bound credential: exit 0", r.code === 0, `code=${r.code} err=${r.err.trim()}`);
+  const s = existsSync(sessPath(home)) ? readFileSync(sessPath(home), "utf8") : "";
+  check("bound credential: session saved with room + credential",
+    /ambok-aaaaa-aaaaa/i.test(s) && /acq1_/.test(s), s.slice(0, 200));
+  check("bound credential: durability warning printed",
+    /could not confirm durable storage/.test(r.err + r.out), (r.err + r.out).slice(0, 200));
+}
+// 13. The same ambiguous join whose credential decodes to a DIFFERENT
+// room: no binding, generic unconfirmed failure, nothing saved.
+{
+  const home = makeHome();
+  const r = await runCli(home, base, ["join", "AMBBAD-AAAAA-AAAAA"]);
+  check("ambiguous join + foreign credential: exit 1", r.code !== 0, `code=${r.code} out=${r.out.trim()}`);
+  check("foreign credential: generic unconfirmed message",
+    /outcome unknown/.test(r.err + r.out), (r.err + r.out).slice(0, 200));
+  check("foreign credential: no session file written", !existsSync(sessPath(home)));
+}
+// 14. Typed ambiguous create (500 stored:"unknown") whose credential
+// binds to the roomId it came with: created-from-answer, exit 0, saved.
+{
+  const home = makeHome();
+  newMode = "bound";
+  const r = await runCli(home, base, ["new"]);
+  newMode = "ok";
+  const s = existsSync(sessPath(home)) ? readFileSync(sessPath(home), "utf8") : "";
+  check("ambiguous create + bound credential: exit 0, session saved",
+    r.code === 0 && /ZROOM-AAAAA-AAAAA/.test(s) && /acq1_/.test(s), `code=${r.code} err=${r.err.trim()}`);
+}
+// 15. The same ambiguous create with a credential for a DIFFERENT room:
+// no binding, unconfirmed failure, nothing saved.
+{
+  const home = makeHome();
+  newMode = "mismatch";
+  const r = await runCli(home, base, ["new"]);
+  newMode = "ok";
+  check("ambiguous create + foreign credential: exit 1, nothing saved",
+    r.code !== 0 && !existsSync(sessPath(home)), `code=${r.code} err=${r.err.trim()}`);
 }
 
 stub.close();

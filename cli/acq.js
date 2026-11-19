@@ -215,11 +215,37 @@ async function apiMut(method, path, { token, body, validate } = {}) {
   return { kind: "error", status: res.status, detail };
 }
 const isStr = v => typeof v === "string" && v.length > 0;
-// Binding checks: the fields the CLI actually saves and needs. credential
-// (which packs the recovery secret) is saved when present but not required
-// - the server always sends it, and a room stays usable without it.
-const validCreate = d => isStr(d.roomId) && isStr(d.token);
-const validJoin = d => isStr(d.token);
+const normUin = s => (s || "").toUpperCase().replace(/[-\s]/g, "");
+// A credential packs {uin, token, ...}: decode it so a returned credential
+// can be bound to the room it claims to seat - a mismatched or
+// undecodable one is no answer at all, never a credential to save.
+function decodeCred(blob) {
+  if (!isStr(blob) || !blob.startsWith("acq1_")) return null;
+  try {
+    const c = JSON.parse(Buffer.from(blob.slice(5), "base64url").toString("utf8"));
+    return isStr(c.uin) && isStr(c.token) ? c : null;
+  } catch { return null; }
+}
+// Binding checks: the fields the CLI actually saves, and when a credential
+// is present its decoded UIN must BE the room in play - for create that is
+// the answer's own roomId, for join the room that was asked for. The
+// credential is saved when present but not required: the server always
+// sends it, and a room stays usable without it.
+const validCreate = d => {
+  if (!isStr(d.roomId) || !isStr(d.token)) return false;
+  if (d.credential === undefined) return true;
+  const c = decodeCred(d.credential);
+  return !!c && normUin(c.uin) === normUin(d.roomId);
+};
+const validJoin = (d, uin) => {
+  if (d.credential !== undefined) {
+    // An ambiguous join answer may carry ONLY the credential: the decoded
+    // UIN must then BE the room asked for, and its token becomes the seat.
+    const c = decodeCred(d.credential);
+    return !!c && normUin(c.uin) === normUin(uin);
+  }
+  return isStr(d.token);
+};
 
 async function api(method, path, { token, body } = {}) {
   const headers = {};
@@ -274,9 +300,13 @@ switch (cmd) {
   case "join": {
     const uin = joinArgToUin(args[1]);
     if (!uin) { console.error("usage: acq join <uin-or-invite-link>"); process.exit(1); }
-    const r = await apiMut("POST", `/room/${uin}/join`, { validate: validJoin });
+    const r = await apiMut("POST", `/room/${uin}/join`, { validate: d => validJoin(d, uin) });
     if (r.kind === "ok" || r.kind === "committed") {
-      saveState({ room: uin, token: r.data.token, seat: "B", ...(isStr(r.data.credential) ? { credential: r.data.credential } : {}) });
+      // An ambiguous (committed) answer can carry the seat token only
+      // inside the credential - take it from there when the top level
+      // has none, so the saved session is actually usable.
+      const cred = decodeCred(r.data.credential);
+      saveState({ room: uin, token: isStr(r.data.token) ? r.data.token : (cred ? cred.token : undefined), seat: "B", ...(isStr(r.data.credential) ? { credential: r.data.credential } : {}) });
       seedCursor(uin);
       console.log(`Joined room ${uin}. ${fmtTime(r.data.expiresAt)}.`);
       if (r.kind === "committed") console.error(`warning: your seat was claimed but the server could not confirm durable storage (it answered ${r.status} with stored:"unknown"). Your token and recovery secret are saved locally; if the server loses its write across a restart, re-enter with the recovery code in the saved credential.`);
@@ -314,7 +344,9 @@ switch (cmd) {
     // typed outcome in its "stored" field: false is a definite pre-commit
     // rejection (nothing stored, no late commit possible), "unknown" means
     // committed-but-durability-unconfirmed and the body then carries the
-    // send's seq and cid - used only when the cid binds to THIS request.
+    // send's seq and cid - trusted only when the EXACT cid of this request
+    // and a valid seq bind the answer to it (a malformed or incompatible
+    // body is no binding and is ignored).
     // Typed or not, the transcript check below stays the arbiter; the
     // typed field only sharpens how a negative outcome is reported.
     let received = null, typed = null;
@@ -322,7 +354,7 @@ switch (cmd) {
       const data = await res.json().catch(() => ({}));
       received = `error ${res.status}: ${typeof data.detail === "string" ? data.detail : "request failed"}`;
       if (data.stored === false) typed = "definite";
-      else if (data.stored === "unknown" && (data.cid === undefined || data.cid === cid) && (data.seq === undefined || typeof data.seq === "number")) typed = "unknown";
+      else if (data.stored === "unknown" && data.cid === cid && typeof data.seq === "number") typed = "unknown";
       res = null;
     }
     let d = null;

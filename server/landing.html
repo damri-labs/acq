@@ -424,6 +424,16 @@ document.getElementById('fb').addEventListener('submit', function(e){
   var btn = document.getElementById('open-go');
   var topicIn = document.getElementById('open-topic');
   var st = document.getElementById('open-status');
+  // A credential packs {uin, token, ...}; the UIN decoded from it must BE
+  // the room this answer created - a mismatch is no credential to save.
+  function credBinds(blob, roomId){
+    if (!blob || blob.slice(0,5) !== 'acq1_') return false;
+    try {
+      var b64 = blob.slice(5).replace(/-/g,'+').replace(/_/g,'/');
+      var c = JSON.parse(atob(b64 + '='.repeat((4 - b64.length % 4) % 4)));
+      return !!(c.uin && c.token) && c.uin.toUpperCase() === roomId.toUpperCase();
+    } catch(e){ return false; }
+  }
   function go(){
     btn.disabled = true;
     st.textContent = '';
@@ -439,7 +449,7 @@ document.getElementById('fb').addEventListener('submit', function(e){
       return r.json().catch(function(){ return null; }).then(function(d){
         if (r.ok && d && d.credential && d.roomId) return d;
         if (d && d.stored === false) { st.textContent = (d.detail || 'Could not open a room.') + ' Nothing was created - try again.'; return null; }
-        if (d && d.stored === 'unknown' && d.credential && d.roomId) { d._durabilityUnknown = true; return d; }
+        if (d && d.stored === 'unknown' && d.roomId && credBinds(d.credential, d.roomId)) { d._durabilityUnknown = true; return d; }
         if (r.status >= 500 || r.ok) { st.textContent = 'The room may have been created, but no usable credential came back - it cannot be reclaimed and expires unclaimed. Open a fresh room instead.'; return null; }
         st.textContent = 'Could not open a room (' + r.status + ').';
         return null;

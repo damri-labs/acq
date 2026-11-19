@@ -104,6 +104,40 @@ function startStub() {
             res.writeHead(410, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ detail: "room ended" }));
             return;
+          // Typed storage outcomes (the SPEC's 500 contract):
+          case "unknownBound": {
+            // Committed, and the 500 carries this request's exact cid +
+            // seq: the typed field binds to the request and verifies it.
+            const m = commit();
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ detail: "sent, but the copy cannot be confirmed; it may be deleted when the server restarts", stored: "unknown", seq: m.seq, cid: m.cid }));
+            return;
+          }
+          case "unknownBare":
+            // Committed, but the 500's stored:"unknown" has no cid/seq:
+            // no binding, so the transcript check stays the arbiter.
+            commit();
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ detail: "sent, but the copy cannot be confirmed", stored: "unknown" }));
+            return;
+          case "unknownBareNoCommit":
+            // Same unbound claim, but NOTHING committed: the claim alone
+            // must never become a definite answer either way.
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ detail: "sent, but the copy cannot be confirmed", stored: "unknown" }));
+            return;
+          case "definiteFalse":
+            // Definite pre-commit rejection, nothing committed.
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ detail: "the message was not stored and re-sending as-is is safe", stored: false }));
+            return;
+          case "definiteFalseAfterCommit":
+            // An intermediary fakes a definite rejection over a real
+            // commit: the transcript check must correct the typed field.
+            commit();
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ detail: "the message was not stored and re-sending as-is is safe", stored: false }));
+            return;
         }
       });
       return;
@@ -261,6 +295,61 @@ async function freshRoom() {
   const { home, stub } = await freshRoom();
   const r = await run(home, stub.port, ["send", "never-sent", "--unknownflag"]);
   check("unknown flag on send: exit 1 before any request", r.code === 1 && /--unknownflag/.test(r.err) && stub.st.msgs.length === 0, `code=${r.code} err=${r.err} stored=${stub.st.msgs.length}`);
+  stub.close();
+}
+
+// 11. Typed outcome: stored:"unknown" carrying THIS request's exact cid
+// and a valid seq verifies the send on its own (no poll needed).
+{
+  const { home, stub } = await freshRoom();
+  stub.st.mode = "unknownBound";
+  const r = await run(home, stub.port, ["send", "bound-unknown"]);
+  check("bound stored:unknown verifies the send, exit 0", r.code === 0 && /verified after an ambiguous failure/.test(r.out), `code=${r.code} out=${r.out} err=${r.err}`);
+  check("exactly one copy behind the bound unknown", stub.st.msgs.length === 1, JSON.stringify(stub.st.msgs));
+  stub.close();
+}
+
+// 12. stored:"unknown" with NO cid/seq is no binding: ignored as typed
+// evidence, and the transcript check still verifies a real commit.
+{
+  const { home, stub } = await freshRoom();
+  stub.st.mode = "unknownBare";
+  const r = await run(home, stub.port, ["send", "bare-unknown-committed"]);
+  check("unbound stored:unknown over a commit still verifies via transcript", r.code === 0 && /verified after an ambiguous failure/.test(r.out), `code=${r.code} out=${r.out} err=${r.err}`);
+  stub.close();
+}
+
+// 13. The same unbound claim over NOTHING committed: generic unconfirmed,
+// never a definite "safe to re-send" and never a false verified.
+{
+  const { home, stub } = await freshRoom();
+  stub.st.mode = "unknownBareNoCommit";
+  const r = await run(home, stub.port, ["send", "bare-unknown-empty"]);
+  check("unbound stored:unknown over nothing: unconfirmed, exit 1", r.code === 1 && /unconfirmed/.test(r.err), `code=${r.code} err=${r.err}`);
+  check("no definite safe-to-resend phrasing on an unbound claim", !/not stored and re-sending as-is is safe/.test(r.err), r.err.slice(0, 200));
+  check("nothing stored behind the bare claim", stub.st.msgs.length === 0, JSON.stringify(stub.st.msgs));
+  stub.close();
+}
+
+// 14. Definite stored:false over an empty transcript: the send did not
+// happen and re-sending is safe (the SPEC's pre-commit rejection).
+{
+  const { home, stub } = await freshRoom();
+  stub.st.mode = "definiteFalse";
+  const r = await run(home, stub.port, ["send", "definite-noop"]);
+  check("stored:false reported definite-not-stored, exit 1", r.code === 1 && /not stored and re-sending as-is is safe/.test(r.err), `code=${r.code} err=${r.err}`);
+  check("nothing stored behind the definite rejection", stub.st.msgs.length === 0, JSON.stringify(stub.st.msgs));
+  stub.close();
+}
+
+// 15. An intermediary can fake stored:false over a real commit: the
+// transcript check corrects the typed definite into verified-sent.
+{
+  const { home, stub } = await freshRoom();
+  stub.st.mode = "definiteFalseAfterCommit";
+  const r = await run(home, stub.port, ["send", "fake-definite"]);
+  check("fake stored:false over a commit corrected to verified, exit 0", r.code === 0 && /verified after an ambiguous failure/.test(r.out), `code=${r.code} out=${r.out} err=${r.err}`);
+  check("exactly one copy behind the fake rejection", stub.st.msgs.length === 1, JSON.stringify(stub.st.msgs));
   stub.close();
 }
 

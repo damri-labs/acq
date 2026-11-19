@@ -65,9 +65,9 @@
     position: fixed; left: 0; right: 0; bottom: 0;
     background: var(--bg); border-top: 1px solid var(--border); padding: 14px 20px;
   }
-  #composer .row { max-width: 680px; margin: 0 auto; display: flex; gap: 10px; }
+  #composer .row { max-width: 680px; margin: 0 auto; display: flex; gap: 10px; flex-wrap: wrap; }
   #composer input {
-    flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    flex: 1 1 150px; min-width: 0; background: var(--card); border: 1px solid var(--border); border-radius: 10px;
     color: var(--fg); padding: 12px 16px; font: 14px/1.4 inherit;
   }
   #composer input:focus { outline: none; border-color: var(--green); }
@@ -377,13 +377,14 @@
           if (r.status === 429) { sendErr.textContent = 'Rate limited - wait a moment and send again. Your text is still in the box.'; return; }
           // Typed storage outcomes on a 500: stored:false is a definite
           // pre-commit rejection (the text is safe to send again);
-          // stored:"unknown" bound to THIS draft's cid means the message
-          // committed - drop the draft and reconcile by reading. Any
-          // other body proves nothing: keep the text, reconcile by
-          // reading, and say exactly that.
+          // stored:"unknown" carrying THIS draft's exact cid and a valid
+          // seq means the message committed - drop the draft and
+          // reconcile by reading. A stored:"unknown" WITHOUT that exact
+          // binding (malformed or incompatible body) proves nothing:
+          // keep the text, reconcile by reading, and say exactly that.
           return r.json().catch(function(){ return null; }).then(function(d){
             if (d && d.stored === false) { sendErr.textContent = 'Send failed - the server confirmed nothing was stored. Your text is still in the box; send it again.'; return; }
-            if (d && d.stored === 'unknown' && (d.cid === undefined || d.cid === draftCid)) {
+            if (d && d.stored === 'unknown' && d.cid === draftCid && typeof d.seq === 'number') {
               draft.value = '';
               draftCid = null;
               sendErr.textContent = 'Delivered, but the server could not confirm durable storage.';
@@ -665,12 +666,16 @@
       }
       // Typed storage outcomes on a 500: stored:false is a definite
       // pre-commit rejection (nothing was claimed, retry safe), while
-      // stored:"unknown" carrying a usable credential means the seat IS
-      // claimed - the credential must be seated, never dropped (dropping
-      // it orphans the claimed seat). Every other non-ok status settles
-      // the attempt as before.
+      // stored:"unknown" carrying a usable credential whose decoded UIN
+      // IS this room means the seat IS claimed - the credential must be
+      // seated, never dropped (dropping it orphans the claimed seat). A
+      // credential that decodes to a different room is no answer to this
+      // join. Every other non-ok status settles the attempt as before.
       return r.json().catch(function(){ return null; }).then(function(d){
-        if (d && d.stored === 'unknown' && unpack(d.credential)) { clearTimeout(myWatch); d._durabilityUnknown = true; return d; }
+        if (d && d.stored === 'unknown') {
+          var cu = unpack(d.credential);
+          if (cu && cu.uin.toUpperCase() === uin.toUpperCase()) { clearTimeout(myWatch); d._durabilityUnknown = true; return d; }
+        }
         clearTimeout(myWatch);
         if (mySeq !== joinSeq) return null; // stale failure: the newest attempt owns the UI
         checkBtn.hidden = true;
