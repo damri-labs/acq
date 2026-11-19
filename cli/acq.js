@@ -345,8 +345,8 @@ switch (cmd) {
     // rejection (nothing stored, no late commit possible), "unknown" means
     // committed-but-durability-unconfirmed and the body then carries the
     // send's seq and cid - trusted only when the EXACT cid of this request
-    // and a valid seq bind the answer to it (a malformed or incompatible
-    // body is no binding and is ignored).
+    // and a valid positive-integer seq bind the answer to it (a
+    // malformed or incompatible body is no binding and is ignored).
     // Typed or not, the transcript check below stays the arbiter; the
     // typed field only sharpens how a negative outcome is reported.
     let received = null, typed = null;
@@ -354,7 +354,7 @@ switch (cmd) {
       const data = await res.json().catch(() => ({}));
       received = `error ${res.status}: ${typeof data.detail === "string" ? data.detail : "request failed"}`;
       if (data.stored === false) typed = "definite";
-      else if (data.stored === "unknown" && data.cid === cid && typeof data.seq === "number") typed = "unknown";
+      else if (data.stored === "unknown" && data.cid === cid && Number.isSafeInteger(data.seq) && data.seq >= 1) typed = "unknown";
       res = null;
     }
     let d = null;

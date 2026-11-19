@@ -378,13 +378,14 @@
           // Typed storage outcomes on a 500: stored:false is a definite
           // pre-commit rejection (the text is safe to send again);
           // stored:"unknown" carrying THIS draft's exact cid and a valid
-          // seq means the message committed - drop the draft and
-          // reconcile by reading. A stored:"unknown" WITHOUT that exact
-          // binding (malformed or incompatible body) proves nothing:
-          // keep the text, reconcile by reading, and say exactly that.
+          // positive-integer seq means the message committed - drop the
+          // draft and reconcile by reading. A stored:"unknown" WITHOUT
+          // that exact binding (missing/foreign cid, or a seq that is not
+          // a safe positive integer) proves nothing: keep the text,
+          // reconcile by reading, and say exactly that.
           return r.json().catch(function(){ return null; }).then(function(d){
             if (d && d.stored === false) { sendErr.textContent = 'Send failed - the server confirmed nothing was stored. Your text is still in the box; send it again.'; return; }
-            if (d && d.stored === 'unknown' && d.cid === draftCid && typeof d.seq === 'number') {
+            if (d && d.stored === 'unknown' && d.cid === draftCid && Number.isSafeInteger(d.seq) && d.seq >= 1) {
               draft.value = '';
               draftCid = null;
               sendErr.textContent = 'Delivered, but the server could not confirm durable storage.';

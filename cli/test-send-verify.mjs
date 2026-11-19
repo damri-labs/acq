@@ -138,6 +138,20 @@ function startStub() {
             res.writeHead(500, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ detail: "the message was not stored and re-sending as-is is safe", stored: false }));
             return;
+          case "unknownBadSeq": {
+            // Exact cid but an INVALID seq (st.badSeq: 0, 1.5, "3",
+            // undefined=missing, 2**53): no binding, transcript arbitrates.
+            commit();
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ detail: "sent, but the copy cannot be confirmed", stored: "unknown", cid: b.cid, seq: st.badSeq }));
+            return;
+          }
+          case "unknownBadSeqNoCommit":
+            // Same invalid binding over NOTHING committed: unconfirmed,
+            // never a typed verdict either way.
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ detail: "sent, but the copy cannot be confirmed", stored: "unknown", cid: b.cid, seq: st.badSeq }));
+            return;
         }
       });
       return;
@@ -350,6 +364,26 @@ async function freshRoom() {
   const r = await run(home, stub.port, ["send", "fake-definite"]);
   check("fake stored:false over a commit corrected to verified, exit 0", r.code === 0 && /verified after an ambiguous failure/.test(r.out), `code=${r.code} out=${r.out} err=${r.err}`);
   check("exactly one copy behind the fake rejection", stub.st.msgs.length === 1, JSON.stringify(stub.st.msgs));
+  stub.close();
+}
+
+// 16-20. Exact cid but an INVALID seq (0, 1.5, string, missing, 2**53):
+// no typed binding - the draft/verdict is decided by the transcript.
+for (const [label, bad] of [["zero", 0], ["fraction", 1.5], ["string", "3"], ["missing", undefined], ["over-safe", 2 ** 53]]) {
+  const { home, stub } = await freshRoom();
+  stub.st.mode = "unknownBadSeq"; stub.st.badSeq = bad;
+  const r = await run(home, stub.port, ["send", `badseq-${label}`]);
+  check(`invalid seq (${label}) over a commit: typed claim ignored, transcript verifies, exit 0`, r.code === 0 && /verified after an ambiguous failure/.test(r.out), `code=${r.code} out=${r.out} err=${r.err}`);
+  check(`exactly one copy behind invalid seq (${label})`, stub.st.msgs.length === 1, JSON.stringify(stub.st.msgs));
+  stub.close();
+}
+// 21. Invalid seq over NOTHING committed: unconfirmed, exit 1.
+{
+  const { home, stub } = await freshRoom();
+  stub.st.mode = "unknownBadSeqNoCommit"; stub.st.badSeq = 0;
+  const r = await run(home, stub.port, ["send", "badseq-empty"]);
+  check("invalid seq over nothing: unconfirmed, exit 1", r.code === 1 && /unconfirmed/.test(r.err), `code=${r.code} err=${r.err}`);
+  check("nothing stored behind the invalid binding", stub.st.msgs.length === 0, JSON.stringify(stub.st.msgs));
   stub.close();
 }
 
