@@ -26,6 +26,28 @@ and the room page. These are the suites the reviewer runs for UI PRs.
   blackholed-connection failure copy ("Delivery not confirmed - your text is
   kept."), no auto-retry after connectivity returns.
 - `shots.js` - full-page landing screenshots, guest and signed-in views.
+- `join-recovery.js` - guest-join pending/recovery suite (P1-P4): a delayed
+  join shows a visible pending state; a blackholed join triggers the
+  explanatory watchdog (15s, cancels nothing) which offers a manual room
+  status check; the check reads an unpaired snapshot with truthful
+  in-flight wording and a deliberate retry joins; a commit-then-lost join
+  gets honest paired wording including the lost-reply possibility with no
+  duplicate claim; a failed status check leaves the state unknown until a
+  later check recovers. Needs the proxy (PROXY_URL) with FLAGS_DIR shared.
+- `join-race2.js` - stale-check guard suite (P7-P9): a join succeeding
+  while a check is outstanding is never clobbered by the late check;
+  out-of-order join retries keep the newest attempt owning the UI
+  (attempt-local timers, stale failures cannot write); a hung status
+  check gets its own explanatory watchdog and manual recheck. Needs the
+  proxy with FLAGS_DIR shared.
+- `join-body.js` - stalled-body suite (P10-P13): 200 headers arriving long
+  before the body keep BOTH the join watchdog and the check watchdog armed
+  until the body actually settles; a newly started join invalidates a
+  still-pending check's right to overwrite the join's pending UI; and a
+  stale check's late-arriving body can neither enable the button nor
+  overwrite the state while a NEWER check is outstanding. Needs the proxy
+  with FLAGS_DIR shared.
+
 - `self-reentry.js` - same-browser credential-isolation suite (11
   assertions): a browser holding a seat-A credential re-enters seat A on
   reload and in a second tab (deliberate resume), its posts land on the
