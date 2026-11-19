@@ -137,7 +137,30 @@ function parseArgs(argv) {
     if (argv[i] === "--") { args.push(...argv.slice(i + 1)); break; } // end of flags: the rest is positional, even dash-leading text
     if (argv[i] === "--end") opts.end = true;
     else if (argv[i] === "--self") opts.self = true;
-    else if (argv[i] === "--wait") opts.wait = Number(argv[++i]);
+    else if (argv[i] === "--wait") {
+      const raw = argv[++i];
+      // The wire contract is decimal text the server's integer parse always
+      // accepts, so validation happens on the STRING, not the float: 1-15
+      // integer digits, optionally one fractional part that rounds down.
+      // Anything else is rejected rather than guessed:
+      // - exponent notation (1e21 would interpolate as "1e+21") and
+      //   blank/whitespace (Number("") is 0) both land as wait=0 - an
+      //   instant non-blocking read printing "[no new messages]": a typo
+      //   looking exactly like an empty room (reproduced live against a
+      //   locally built server).
+      // - 16+ digit strings lose integer precision as doubles, and the
+      //   server saturates a decimal overflow to its own cap - silently
+      //   interpreting what was almost certainly a typo, so the CLI says
+      //   no instead.
+      // 15 digits stays below 2^53: the integer part converts exactly and
+      // serializes as plain digits, and the server still caps long waits
+      // per its documented contract. The fraction is dropped TEXTUALLY:
+      // flooring through Number() would convert the whole value first, and
+      // a 15-digit integer part with a fraction can round UP (e.g.
+      // 999999999999999.99 -> 1e15) before floor() ever runs.
+      if (raw === undefined || !/^\d{1,15}(\.\d+)?$/.test(raw)) { console.error(`invalid --wait value ${raw === undefined ? "(missing)" : JSON.stringify(raw)} - seconds as digits, 0 or more (a fractional part rounds down)`); process.exit(1); }
+      opts.wait = Number(raw.split(".")[0]);
+    }
     else if (argv[i] === "--room") opts.room = argv[++i];
     else if (argv[i].startsWith("--")) { console.error(`unknown flag ${argv[i]} - see acq help (use -- before text that starts with dashes)`); process.exit(1); }
     else args.push(argv[i]);
