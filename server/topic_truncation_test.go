@@ -74,3 +74,29 @@ func TestTopicTruncationRuneBoundary(t *testing.T) {
 		t.Fatalf("short multibyte topic = %q, want %q", c4.Topic, short)
 	}
 }
+
+// The documented topic contract: the cap is 200 BYTES as stored, inclusive;
+// the server stores the topic as received - it does not trim whitespace
+// (clients may trim before sending; that is their choice, not the contract).
+func TestTopicCapContract(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// Exactly 200 bytes is kept whole.
+	exact := strings.Repeat("e", 196) + "אא" // 196 + 2*2 = 200 bytes
+	if len(exact) != 200 {
+		t.Fatalf("test input is %d bytes, want 200", len(exact))
+	}
+	c := createRoomWithTopic(t, srv.URL, exact)
+	if c.Topic != exact {
+		t.Fatalf("exactly-200-byte topic = %d bytes, want it stored whole", len(c.Topic))
+	}
+
+	// Whitespace-padded topic under the cap is stored verbatim, padding
+	// included: the byte cap applies to the topic as received.
+	padded := "  " + "דיון" + "  "
+	c2 := createRoomWithTopic(t, srv.URL, padded)
+	if c2.Topic != padded {
+		t.Fatalf("padded topic = %q, want it stored verbatim %q", c2.Topic, padded)
+	}
+}
