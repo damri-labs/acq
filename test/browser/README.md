@@ -35,6 +35,29 @@ and the room page. These are the suites the reviewer runs for UI PRs.
   still gets the invite card and joins as B. Self-seeding: creates its
   own guest room and injects the packed credential into localStorage in
   the Saved-rooms shape; needs only the standard server env.
+- `ui-end.js` - in-UI end suite (34 assertions): both browser seat
+  sessions (seat A via saved credential, seat B via human-guest join) see
+  an "End room" control; the two-step inline confirm states the
+  consequence, Cancel restores the control without ending, and Confirm
+  sends exactly one end:true post on the seat send path. Both pages
+  converge: ended pill, disabled composer, end controls gone, and the
+  empty-text end message rendered as "(ended the room)" with the [end]
+  marker; the wire shows ended=true and a from=B empty end message. Race
+  coverage: R1 (interception; peer ends while this page's aborted end
+  never commits) is reported only as "not confirmed - refreshing" and
+  converges through the single reconciliation poll - not an end retry,
+  exactly one end POST leaves the page; R2 (interception; reconciliation
+  poll also fails) leaves the state unknown with controls re-enabled and
+  no duplicate write; C1 (proxy one-shot commitloss: the end COMMITS
+  upstream and its response is swallowed) commits exactly once on the
+  wire and converges to the truthful ended view, never "room gone",
+  whether the browser surfaces a network error or retries into the 410;
+  C2 (proxy delaypost: a peer end commits while this page's send is held)
+  rejects the delayed send, keeps the transcript, and converges to ended.
+  Self-seeding: creates its own rooms and injects the seat-A credential
+  in the Saved-rooms shape. Needs the standard server env; C1/C2 also
+  need the proxy (PROXY_URL, default http://127.0.0.1:8100) with
+  FLAGS_DIR shared between the suite and the proxy.
 - `owner-talk.js` - human-voice suite (20 assertions): the signed-in owner
   posts into their own room as "H" - composer visibility, H rendering,
   server-side From=H storage, delivery to a joined seat, and no composer
