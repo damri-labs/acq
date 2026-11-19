@@ -36,6 +36,14 @@ const HEB_FIT  = 'ש'.repeat(CAP / 2);        // exactly 65536 bytes
 const ASCII_FIT = 'a'.repeat(CAP);           // exactly 65536 bytes
 const ASCII_OVER = 'a'.repeat(CAP + 1);      // 65537 bytes (evaluate-set bypasses native maxlength)
 const EMOJI_OVER = '😀'.repeat(16385);       // 65540 bytes, 32770 units - under maxlength, over cap
+// Envelope cases: the server caps the whole JSON request body at 69632 bytes
+// (maxMsgSize+4096). With a 36-char uuid cid the body overhead is 68 bytes, so
+// a text of q quote characters (each escapes to 2 bytes) has envelope 2q+68:
+// 34782 quotes = exactly 69632 (must send), 34783 = 69634 (must be held).
+const QUOTE_ENV_FIT = '"'.repeat(34782);   // envelope exactly 69632 - accepted
+const QUOTE_ENV_OVER = '"'.repeat(34783);  // envelope 69634 - held
+const BACKSLASH_OVER = '\\'.repeat(40000); // envelope 80068 - held
+const CTRL_FIT = '\u0001'.repeat(10000);   // envelope 60068 (6 bytes each) - accepted, stored verbatim
 const utf8 = s => new TextEncoder().encode(s).length;
 
 (async () => {
@@ -128,6 +136,39 @@ const utf8 = s => new TextEncoder().encode(s).length;
   st = await draftState();
   ok('overcap emoji: note visible with exact byte size, send held', st.noteShown && st.note.includes(utf8(EMOJI_OVER) + ' bytes') && st.postDisabled === true, st.note.slice(0, 70));
 
+  // -- escape-heavy text just OVER the request envelope: held, exact reason --
+  await setDraft(QUOTE_ENV_OVER);
+  st = await draftState();
+  ok('envelope 69634 (34783 quotes): text fits message cap yet send held', st.noteShown && st.postDisabled === true, st.note.slice(0, 80));
+  ok('envelope over: note shows exact escaped request size and limit', st.note.includes('69634') && st.note.includes('69632-byte request limit'), st.note.slice(0, 120));
+  postsBefore = msgPosts;
+  await page.click('#post').catch(() => {});
+  await sleep(300);
+  ok('envelope over: click posts nothing, draft intact', msgPosts === postsBefore && (await draftState()).chars === 34783, 'posts=' + msgPosts);
+
+  // -- escape-heavy text at EXACTLY the request envelope cap: sends, stored verbatim --
+  await setDraft(QUOTE_ENV_FIT);
+  st = await draftState();
+  ok('envelope exactly 69632 (34782 quotes): note cleared, send enabled', st.noteShown === false && st.postDisabled === false);
+  await page.click('#post');
+  await page.waitForFunction(() => document.getElementById('draft').value === '', { timeout: 6000 }).catch(() => {});
+  st = await draftState();
+  ok('envelope exactly 69632: send accepted by server, draft cleared', st.chars === 0, 'chars=' + st.chars);
+
+  // -- backslash-heavy text over the envelope: held --
+  await setDraft(BACKSLASH_OVER);
+  st = await draftState();
+  ok('envelope 80068 (40000 backslashes): held with exact size', st.noteShown && st.postDisabled === true && st.note.includes('80068'), st.note.slice(0, 80));
+
+  // -- control-character text inside both caps: sends, stored verbatim --
+  await setDraft(CTRL_FIT);
+  st = await draftState();
+  ok('envelope 60068 (10000 control chars): note cleared, send enabled', st.noteShown === false && st.postDisabled === false);
+  await page.click('#post');
+  await page.waitForFunction(() => document.getElementById('draft').value === '', { timeout: 6000 }).catch(() => {});
+  st = await draftState();
+  ok('envelope 60068 control chars: send accepted, draft cleared', st.chars === 0, 'chars=' + st.chars);
+
   // -- back under the cap: note clears, button re-enables --
   await setDraft(HEB_FIT);
   st = await draftState();
@@ -149,12 +190,12 @@ const utf8 = s => new TextEncoder().encode(s).length;
   st = await draftState();
   ok('boundary ascii 65536B: send accepted, draft cleared', st.chars === 0, 'chars=' + st.chars);
 
-  // -- server-side truth: exactly the two boundary messages, byte-for-byte --
+  // -- server-side truth: exactly the four accepted messages, byte-for-byte --
   const tr = await (await safeFetch(BASE + '/room/' + encodeURIComponent(uin) + '/msg?since=0&wait=0&self=1&peek=1', { headers: { Authorization: 'Bearer ' + token } })).json();
   const msgs = tr.msgs || tr.messages || [];
-  ok('transcript: exactly the 2 accepted boundary messages stored', msgs.length === 2, 'msgs=' + msgs.length);
+  ok('transcript: exactly the 4 accepted messages stored', msgs.length === 4, 'msgs=' + msgs.length);
   ok('transcript: stored text equals entered text byte-for-byte',
-     msgs.length === 2 && msgs[0].text === HEB_FIT && msgs[1].text === ASCII_FIT,
+     msgs.length === 4 && msgs[0].text === QUOTE_ENV_FIT && msgs[1].text === CTRL_FIT && msgs[2].text === HEB_FIT && msgs[3].text === ASCII_FIT,
      'lens=' + msgs.map(m => (m.text || '').length).join(','));
 
   ok('scope: no non-loopback request finished or blocked', nonLoopbackFinished === 0 && nonLoopbackBlocked === 0, 'finished=' + nonLoopbackFinished + ' blocked=' + nonLoopbackBlocked);
