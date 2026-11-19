@@ -1,7 +1,8 @@
 # Browser test harness (web UI)
 
 Headless-Chrome (puppeteer-core) suites for the ACQ web UI: the landing page
-and the room page. These are the suites the reviewer runs for UI PRs.
+and the room page. Reviewers should run the suites from this list that a UI change
+touches before merging it.
 
 ## Layout
 
@@ -116,6 +117,49 @@ and the room page. These are the suites the reviewer runs for UI PRs.
   key sha256("acq-session-v1\0" + ACQ_SESSION_SECRET), payload
   base64url({"sub","email","exp"}), HMAC-SHA256 signature).
 
+- `join-cred.js` - join credential-validation boundary suite (P14): a 200
+  join reply whose body is missing or carries an unusable credential must
+  NOT latch the join; an outstanding attempt's valid late reply can still
+  seat the browser, and the UI says the seat may-or-may-not be claimed
+  instead of asserting a claim. Needs the proxy (PROXY_URL) with FLAGS_DIR
+  shared.
+- `send-commitloss.js` - commit-loss idempotency suite: a guest send whose
+  response is lost AFTER commit (Chrome transparently retries the dropped
+  POST once) commits the message exactly once with the per-draft cid and
+  server resubmission handling; a manual retry of an unconfirmed draft
+  (same cid) does not duplicate either. Needs the proxy (PROXY_PORT) with
+  FLAGS_DIR shared, server on UPSTREAM_PORT.
+- `topic-limit.js` - topic byte-limit suite (landing page, #open-topic): a
+  non-ASCII topic is never shortened silently. Over the server's 200-byte
+  cap the page keeps the text untouched, shows the byte size and the exact
+  prefix a room would store, and holds the submit (click AND Enter); a
+  composition-confirming Enter (IME) never submits, an ordinary Enter
+  under the cap does. No proxy needed; BASE_URL enforced loopback-only;
+  creates real rooms in a throwaway ROOMS_DIR.
+- `message-limit.js` - message byte-limit and request-envelope suite (room
+  page, #draft): over the 65536-byte message cap the page keeps the text
+  untouched, shows its byte size, and holds the send (click AND Enter). A
+  draft inside the message cap whose JSON-escaped request would exceed the
+  server's 69632-byte request cap (quotes, backslashes, control characters
+  inflate the body) is held with its exact measured size. The boundary
+  cases the suite sends - 65536-byte Hebrew and ASCII texts, and a quoted
+  draft whose escaped request is exactly 69632 bytes - go through and are
+  stored byte-for-byte. No proxy needed; BASE_URL enforced
+  loopback-only.
+- `composer-ime-enter.js` - composer IME Enter suite (room page, #draft):
+  a composition-confirming Enter (isComposing=true) is text input, not
+  send intent, and never posts the draft; an ordinary Enter posts.
+  Synthetic dispatch only - no claim about real IME behavior beyond the
+  DOM contract it dispatches. No proxy needed; BASE_URL enforced
+  loopback-only.
+- `message-cid.js` - message client-correlation-id suite (room page,
+  #draft): the per-draft cid is stable across send retries of the same
+  draft (the retry body is byte-identical - idempotent resubmission),
+  fresh after any edit, and measured exactly by the request-envelope gate
+  on both the uuid and fallback cid paths (the fallback path is exercised
+  for real, with crypto.randomUUID removed). No proxy needed; BASE_URL
+  enforced loopback-only.
+
 ## Setup
 
 1. Run the server on :8099:
@@ -151,9 +195,8 @@ printf 'U3=%s\nCRED3=%s\n' "$U3" "$(jq -r .credential t3.json)" > env3.txt
 
 ## Run
 
-Both suites print PASS/FAIL lines and set the process exit code: exit 0
-only when every assertion passes, exit 1 on any FAIL (or on a harness
-error). Safe to gate CI or an agent run on `$?`.
+Each suite prints PASS/FAIL lines and sets the process exit code: exit 0
+only when every assertion passes, non-zero on any FAIL or harness error. Safe to gate CI or an agent run on `$?`.
 
 ```sh
 node attra-tests.js
