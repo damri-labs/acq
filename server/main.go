@@ -22,6 +22,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 //go:embed landing.html
@@ -1050,7 +1051,14 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 		createBody.Provisional = true
 	}
 	if len(createBody.Topic) > 200 {
-		createBody.Topic = createBody.Topic[:200]
+		// Truncate on a rune boundary: a mid-rune byte cut would corrupt the
+		// final character into U+FFFD at JSON encoding time, silently losing
+		// information for non-ASCII topics.
+		t := createBody.Topic[:200]
+		for !utf8.ValidString(t) {
+			t = t[:len(t)-1]
+		}
+		createBody.Topic = t
 	}
 	// Validate every option before any state exists, so a bad request never
 	// leaves a half-initialized room behind.
