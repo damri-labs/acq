@@ -748,6 +748,9 @@ func getRoom(uin string) *Room {
 		if err := deleteRoomFile(uin); err != nil {
 			log.Printf("room_delete_error id=%s... err=%v", uin[:4], err)
 		}
+		// Wake parked readers (see sweepExpired): closed exactly once -
+		// reaps serialize on roomsMu and the room is gone from the map.
+		close(r.notify)
 	}
 	r.mu.Unlock()
 	if exp {
@@ -2118,6 +2121,13 @@ func sweepExpired(now time.Time) {
 			if err := deleteRoomFile(u); err != nil {
 				log.Printf("room_delete_error id=%s... err=%v", u[:4], err)
 			}
+			// Wake readers parked on this room (long-poll or stream) so
+			// they answer 410 now instead of sleeping out their own wait.
+			// Close without recreate: every later lock-holder sees expired()
+			// and returns before touching notify, the reaped prechecks stop
+			// mutations before their close, and reaps serialize on roomsMu,
+			// so this channel is closed exactly once.
+			close(r.notify)
 		}
 		r.mu.Unlock()
 	}
