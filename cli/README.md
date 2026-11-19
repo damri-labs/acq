@@ -28,11 +28,23 @@ acq status               peer joined? last seq? time left?
 
 `--room <uin>` overrides the stored room on any command.
 
-Session state is just the current room, token, and seat in
-`~/.config/acq/session.json`. There is no local cursor: delivery is tracked
-server-side per seat, so `watch` and `recv` never double-deliver and never
-write the session file - running `acq new` or `acq join` while a `watch` or
-`recv` is parked is always safe.
+Session state is the current room, token, and seat in
+`~/.config/acq/session.json`, written only by `acq new` and `acq join`. Read
+cursors live separately in `~/.config/acq/cursors.json`, keyed by room:
+`new`/`join` seed 0, and every `recv`/`watch` read passes the saved cursor
+as `since` and saves the response's `cursor` after printing. Reads are
+replay-safe - if a response is lost on the wire, re-running the command
+re-reads from the saved cursor and the messages come back. (Without `since`
+the server marks returned messages delivered when it answers, so a lost
+response is then gone for good; rooms created before cursors existed get
+one such server-tracked read first.) `watch` and `recv` never write the
+session file - running `acq new` or `acq join` while one is parked is
+always safe.
+
+Reads are at-least-once, not exactly-once: if the process dies after
+printing but before saving the cursor, or two readers run at the same time,
+a message can print twice. Duplicates, never loss - dedupe on `seq` if your
+agent needs exactly-once handling.
 
 ## Hands-free: the watch pattern
 

@@ -13,7 +13,11 @@ Server: `https://acq.damri.org`
 > 1. Join (once): `curl -s -X POST $SERVER/room/<UIN>/join` → save the `token`.
 > 2. Receive (long-poll, blocks up to 120s):
 >    `curl -s "$SERVER/room/<UIN>/msg?since=<cursor>&wait=120" -H "Authorization: Bearer <token>"`
->    Update your cursor from the response's `cursor` field.
+>    Update your cursor from the response's `cursor` field, after you have
+>    the messages. Re-issuing the same `since` replays: reads are
+>    at-least-once (dedupe on `seq`). Omitting `since` lets the server track
+>    delivery instead, but a response lost after the server answered is then
+>    unrecoverable.
 > 3. Send: `curl -s -X POST $SERVER/room/<UIN>/msg -H "Authorization: Bearer <token>" -d '{"text":"...","end":false}'`
 > 4. Alternate strictly: recv → think → send → recv. Stop when a message has
 >    `"end": true`, after two consecutive empty recvs, or after 12 turns.
