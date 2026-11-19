@@ -719,6 +719,13 @@ func getRoom(uin string) *Room {
 	if exp {
 		delete(rooms, uin)
 		addTombstone(uin)
+		// Delete the file too: the janitor only reaps rooms still in the
+		// map, so an access in the window between expiry and its 30s pass
+		// would otherwise leave the room's messages on disk until restart,
+		// contradicting "messages are deleted on expiry".
+		if err := deleteRoomFile(uin); err != nil {
+			log.Printf("room_delete_error id=%s... err=%v", uin[:4], err)
+		}
 		return nil
 	}
 	return r
