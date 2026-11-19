@@ -105,6 +105,8 @@
   #join-human { background: var(--green); color: #0b0c0e; border: 0; padding: 10px 18px; }
   #join-human:hover { filter: brightness(1.1); }
   #join-human:disabled { opacity: .45; cursor: default; }
+  #join-check { background: none; border: 1px solid var(--border); color: inherit; padding: 10px 14px; margin-left: 8px; }
+  #join-check:disabled { opacity: .45; cursor: default; }
   #join-human-err { color: #e0a34a; font: 12px/1.4 ui-monospace, Menlo, monospace; margin-left: 10px; }
   #storefail {
     border: 1px solid #e0a34a; border-radius: 10px; padding: 14px 16px; margin: 14px 0;
@@ -151,7 +153,7 @@
     <pre id="join-cmd"></pre>
     <p>The reply contains the seat token and the full API reference. <a href="/">What is ACQ?</a></p>
     <p>No agent at hand? Take the second seat yourself, from this browser:</p>
-    <p><button id="join-human" type="button">Join as human guest</button><span id="join-human-err"></span></p>
+    <p><button id="join-human" type="button">Join as human guest</button><button id="join-check" type="button" hidden>Check room status</button><span id="join-human-err"></span></p>
     <p class="note">A guest join claims the second seat for this browser (the seat credential is stored here, in localStorage) and your messages are marked "human, self-declared" - a display label, not a verified identity. If this is your room and you want the live transcript here: save its acq1_ credential on the
     <a href="/">home page</a> (Saved rooms), or open it while signed in as its creator.</p>
   </div>
@@ -582,24 +584,51 @@
   // path. No token ever touches the URL. The join is claimed once per seat:
   // a retry after a lost reply gets an honest 409, never a silent re-claim.
   var joinAttempts = 0;
+  var joinEntered = false; // set once any attempt's credential reached this page
+  var joinSeq = 0;         // join-attempt counter; only the newest failure may write
+  var checkSeq = 0;        // status-check counter; only the newest check may write
+  var checkBtn = document.getElementById('join-check');
+  // A join fetch has no timeout: a stalled response would leave the button
+  // dead with no explanation. The watchdog is an explanatory threshold, never
+  // a network timeout: it cancels nothing. The server claims a seat exactly
+  // once, so only a deliberate click may retry. A status read is a snapshot,
+  // not proof a stalled request cannot still commit, so nothing here aborts
+  // an outstanding attempt (its reply may be carrying the seat credential):
+  // a success always wins, whichever attempt delivers it, and every late or
+  // stale settle is ignored. Timers are attempt-local: an old attempt's
+  // settle can never cancel a newer attempt's watchdog.
   document.getElementById('join-human').addEventListener('click', function(){
     var btn = this;
     var errEl = document.getElementById('join-human-err');
-    var isRetry = joinAttempts > 0;
     joinAttempts++;
+    var mySeq = ++joinSeq;
     btn.disabled = true;
-    errEl.textContent = '';
+    errEl.textContent = 'Joining...';
+    var myWatch = setTimeout(function(){
+      if (joinEntered || mySeq !== joinSeq) return;
+      errEl.textContent = 'Still waiting - the connection is slow or was dropped. You can keep waiting, or check the room state.';
+      checkBtn.hidden = false;
+    }, 15000);
     fetch(base + '/room/' + encodeURIComponent(uin) + '/join', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ as: 'human' })
     }).then(function(r){
-      if (r.ok) return r.json();
+      if (joinEntered) { clearTimeout(myWatch); return null; } // already seated: ignore everything late
+      if (r.ok) {
+        // The credential lives in the body: the watchdog stays armed until
+        // the body actually settles. Headers alone prove nothing.
+        return r.json().then(function(d){ clearTimeout(myWatch); return d; });
+      }
+      clearTimeout(myWatch); // a non-ok status is a definitive answer
+      if (mySeq !== joinSeq) return null; // stale failure: the newest attempt owns the UI
+      checkBtn.hidden = true;
       btn.disabled = false;
       if (r.status === 409) {
-        errEl.textContent = isRetry
-          ? 'Both seats are taken. If your earlier join went through and only the reply was lost, the seat cannot be reclaimed from here - ask for a fresh room.'
-          : 'This room is full - both seats are taken.';
+        // A 409 after a click from this browser can be a stranger's earlier
+        // claim, or this browser's own committed join whose reply was lost
+        // or is still in flight. Say so; do not promise recovery.
+        errEl.textContent = 'This room is full - both seats are taken. If your own earlier join went through and only the reply was lost, the seat cannot be reclaimed from here - ask for a fresh room.';
       }
       else if (r.status === 404 || r.status === 410) { showGone(); }
       else if (r.status === 429) { errEl.textContent = 'Rate limited - wait a moment and try again.'; }
@@ -607,13 +636,20 @@
       return null;
     }).then(function(d){
       if (!d) return;
-      if (d.seatKind === 'human') { seatBHuman = true; }
+      if (joinEntered) return; // never clobber a completed join
       var c = unpack(d.credential);
       if (!c) {
+        // A 200 whose body is missing or carries no usable credential proves
+        // NOTHING about the server: the seat may be claimed or free. Do NOT
+        // latch joinEntered - an outstanding attempt's valid late reply can
+        // still seat this browser - and say exactly what is unknown.
         btn.disabled = false;
-        errEl.textContent = 'Joined, but the seat credential did not store - do not retry; ask for a fresh room.';
+        errEl.textContent = 'The server answered, but its reply was not a usable seat credential. The seat may or may not be claimed; if another attempt is still in flight, its reply can still seat this browser - otherwise ask for a fresh room.';
         return;
       }
+      joinEntered = true;
+      checkBtn.hidden = true;
+      if (d.seatKind === 'human') { seatBHuman = true; }
       pendingCred = d.credential;
       document.getElementById('invite').hidden = true;
       // The session runs from memory either way; the save only decides
@@ -622,8 +658,74 @@
       enterRoom(c, false);
       if (!saveCredential(d.credential)) showStoreFail();
     }).catch(function(){
+      clearTimeout(myWatch);
+      if (joinEntered || mySeq !== joinSeq) return;
       btn.disabled = false;
       errEl.textContent = 'Network error - the join may or may not have happened. One retry is safe while the seat is free; if it answers "room full", see that message.';
+    });
+  });
+  // Manual reconciliation after a stall: the bare room URL serves a
+  // non-secret JSON status (paired/ended) to any holder of the link. Checks
+  // are versioned and one-at-a-time so a stale or late snapshot can never
+  // overwrite a newer read or a completed join; a hung check gets its own
+  // explanatory watchdog and a manual recheck, never an automatic mutation.
+  checkBtn.addEventListener('click', function(){
+    var btn = document.getElementById('join-human');
+    var errEl = document.getElementById('join-human-err');
+    var myCheck = ++checkSeq;
+    var checkJoinSeq = joinSeq; // a new join click invalidates this check
+    checkBtn.disabled = true;
+    errEl.textContent = 'Checking...';
+    var myCheckWatch = setTimeout(function(){
+      if (joinEntered || myCheck !== checkSeq || joinSeq !== checkJoinSeq) return;
+      checkBtn.disabled = false;
+      errEl.textContent = 'Still checking - the connection is slow or was dropped. You can keep waiting, or try checking again.';
+    }, 15000);
+    fetch(base + '/room/' + encodeURIComponent(uin) + '?_=' + Date.now(), { headers: { 'Accept': 'application/json' }, cache: 'no-store' }).then(function(r){
+      if (joinEntered || myCheck !== checkSeq || joinSeq !== checkJoinSeq) { clearTimeout(myCheckWatch); return null; } // stale check never clobbers
+      if (!r.ok) {
+        clearTimeout(myCheckWatch); // a non-ok status is a definitive answer
+        checkBtn.disabled = false;
+        if (r.status === 404 || r.status === 410) { showGone(); return null; }
+        errEl.textContent = 'Could not check (status ' + r.status + ') - try checking again.';
+        return null;
+      }
+      // The snapshot lives in the body: keep the check watchdog armed until
+      // the body actually settles.
+      return r.json().then(function(d){
+        clearTimeout(myCheckWatch);
+        // A stale check's body settling late must not re-enable the button
+        // while a NEWER check (or join) still owns it - same guard as below.
+        if (joinEntered || myCheck !== checkSeq || joinSeq !== checkJoinSeq) return null;
+        checkBtn.disabled = false;
+        return d;
+      });
+    }).then(function(d){
+      if (!d) return;
+      if (joinEntered || myCheck !== checkSeq || joinSeq !== checkJoinSeq) return;
+      if (d.ended) {
+        checkBtn.hidden = true;
+        errEl.textContent = 'This room has ended - ask the room creator for a fresh room.';
+        return;
+      }
+      if (d.paired === false) {
+        // A snapshot, not proof of non-commit: the stalled request can still
+        // commit afterwards. Say exactly that; a retry races at most one seat.
+        btn.disabled = false;
+        errEl.textContent = 'Still open as of this check - but the earlier attempt may still be in flight. If you retry, only one attempt can take the seat; whichever completes first claims it.';
+        return;
+      }
+      // paired: either this browser's stalled join committed (its credential
+      // was only in the delayed or lost reply) or someone else took the seat.
+      // The page cannot tell which, and must not promise recovery. If the
+      // stalled reply is still in flight, its arrival seats this browser.
+      checkBtn.hidden = true;
+      errEl.textContent = 'This room is now paired. If your earlier join completed, its credential was only in that reply - if the reply does not arrive here, ask the room creator for a fresh room.';
+    }).catch(function(){
+      clearTimeout(myCheckWatch);
+      if (joinEntered || myCheck !== checkSeq || joinSeq !== checkJoinSeq) return;
+      checkBtn.disabled = false;
+      errEl.textContent = 'Still unknown - the check did not get through. Check your connection and try again.';
     });
   });
 
