@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -14,10 +15,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -1819,7 +1822,39 @@ func main() {
 	loadAnalytics()
 	loadRooms()
 	go janitor()
-	log.Printf("acq listening on :%s", port)
 	srv := &http.Server{Addr: ":" + port, Handler: http.MaxBytesHandler(mux, maxMsgSize+4096)}
-	log.Fatal(srv.ListenAndServe())
+	// Graceful shutdown: a platform stop (SIGTERM, e.g. a rolling redeploy)
+	// is a planned event, not a crash - drain in-flight requests and exit 0
+	// so the platform does not report the replacement as a failure. main
+	// blocks on the drain: Shutdown returns only after in-flight handlers
+	// finish or the 2s deadline passes, and on deadline we force-close
+	// remaining connections. The deadline stays inside the 3s stop grace we
+	// configure on the platform (its drain-seconds override; the platform
+	// default is 0, so the override must stay set for this to matter).
+	// Long-polls cut by the deadline are safe by contract: clients re-issue
+	// waits, and every mutation is persisted synchronously already.
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Printf("acq listening on :%s", port)
+		serveErr <- srv.ListenAndServe()
+	}()
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	select {
+	case s := <-sig:
+		log.Printf("shutdown signal %s received, draining", s)
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("shutdown drain ended early (%v), force-closing remaining connections", err)
+		if cerr := srv.Close(); cerr != nil {
+			log.Printf("forced close error: %v", cerr)
+		}
+	}
 }
