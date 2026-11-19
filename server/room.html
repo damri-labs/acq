@@ -74,6 +74,18 @@
   #composer button { background: var(--green); color: #0b0c0e; border: 0; border-radius: 10px; padding: 0 22px; }
   #composer button:hover { filter: brightness(1.1); }
   #composer button:disabled, #draft:disabled { opacity: .45; cursor: default; }
+  #composer #end { background: transparent; color: var(--faint); border: 1px solid var(--border); }
+  #composer #end:hover { color: var(--fg); border-color: var(--faint); filter: none; }
+  #end-confirm {
+    max-width: 680px; margin: 0 auto 10px; display: flex; align-items: center; gap: 10px;
+    border: 1px solid #e0a34a; border-radius: 10px; padding: 10px 14px;
+    background: rgba(224,163,74,.08); color: var(--dim); font: 12.5px/1.5 ui-monospace, Menlo, monospace;
+  }
+  #end-confirm[hidden] { display: none; }
+  #end-confirm span { flex: 1; }
+  #end-confirm button { border-radius: 8px; padding: 6px 14px; border: 1px solid var(--border); background: transparent; color: var(--fg); cursor: pointer; }
+  #end-confirm #end-yes { background: #e0a34a; border-color: #e0a34a; color: #0b0c0e; }
+  #end-confirm button:disabled { opacity: .45; cursor: default; }
   #send-err {
     max-width: 680px; margin: 8px auto 0; min-height: 16px;
     font: 12px/1.4 ui-monospace, Menlo, monospace; color: #e0a34a;
@@ -149,9 +161,15 @@
     <button id="idretry" type="button">Retry</button>
   </div>
   <div id="composer" hidden>
+  <div id="end-confirm" hidden>
+    <span>End this room for both sides? Nobody can post after this. The transcript stays readable until the room expires. This cannot be undone.</span>
+    <button id="end-yes" type="button">Confirm end</button>
+    <button id="end-no" type="button">Cancel</button>
+  </div>
   <div class="row">
     <input id="draft" type="text" placeholder="Message the room..." autocomplete="off" maxlength="65536">
     <button id="post" type="button">Send</button>
+    <button id="end" type="button" hidden>End room</button>
   </div>
   <div id="send-err"></div>
 </div>
@@ -205,6 +223,9 @@
     var d = document.getElementById('draft'), b = document.getElementById('post');
     d.disabled = true; b.disabled = true;
     d.placeholder = why;
+    var eb = document.getElementById('end'), ec = document.getElementById('end-confirm');
+    if (eb) eb.hidden = true;
+    if (ec) ec.hidden = true;
   }
 
   function showGone(){
@@ -231,7 +252,7 @@
     div.setAttribute('data-seat', seatLabel);
     var t = document.createElement('span');
     t.className = 'text';
-    t.textContent = m.text;
+    t.textContent = m.text || (m.end ? '(ended the room)' : '');
     div.appendChild(t);
     if (m.end) {
       var e = document.createElement('span');
@@ -337,7 +358,11 @@
             pollNow();
             return;
           }
-          if (r.status === 404 || r.status === 410) { showGone(); return; }
+          if (r.status === 404) { showGone(); return; }
+          // 410 on a write means ended OR expired - only the read path can
+          // tell which (an ended room still answers reads with ended:true).
+          // Reconcile instead of labeling an ended room gone.
+          if (r.status === 410) { pollNow(); return; }
           if (r.status === 429) { sendErr.textContent = 'Rate limited - wait a moment and send again. Your text is still in the box.'; return; }
           sendErr.textContent = 'Send failed (' + r.status + '). Your text is still in the box.';
         }).catch(function(){
@@ -350,6 +375,59 @@
       }
       postBtn.addEventListener('click', post);
       draft.addEventListener('keydown', function(e){ if (e.key === 'Enter') post(); });
+      // Deliberate end from the UI: seat-credential sessions only. The
+      // owner (H) path never sees it - ending stays a seat action, same
+      // as the API. Two-step inline confirm states the consequence before
+      // anything is sent; the end itself is one end:true post on the same
+      // seat send path, never auto-retried.
+      var endBtn = document.getElementById('end');
+      var endConfirm = document.getElementById('end-confirm');
+      var endYes = document.getElementById('end-yes');
+      var endNo = document.getElementById('end-no');
+      if (c && !asOwner) endBtn.hidden = false;
+      endBtn.addEventListener('click', function(){
+        if (ended || gone) return;
+        endConfirm.hidden = false;
+        endBtn.hidden = true;
+      });
+      endNo.addEventListener('click', function(){
+        endConfirm.hidden = true;
+        endBtn.hidden = false;
+      });
+      endYes.addEventListener('click', function(){
+        if (ended || gone || endYes.disabled) return;
+        endYes.disabled = true; endNo.disabled = true;
+        postBtn.disabled = true; draft.disabled = true;
+        sendErr.textContent = '';
+        fetch(base + '/room/' + encodeURIComponent(uin) + '/msg', {
+          method: 'POST',
+          headers: postHeaders,
+          body: JSON.stringify({ text: '', end: true })
+        }).then(function(r){
+          if (r.ok) { pollNow(); return; }
+          if (r.status === 404) { showGone(); return; }
+          // Same ended-vs-expired distinction as the send path: a 410 here
+          // (including a browser-transparent retry of a committed end whose
+          // first response was lost) reconciles through the read path.
+          if (r.status === 410) { pollNow(); return; }
+          // A received error status proves nothing about room state to
+          // the user (a proxy can answer before the server does) - no
+          // state claim, re-sync from the server instead.
+          sendErr.textContent = 'End failed (' + r.status + ').';
+          endYes.disabled = false; endNo.disabled = false;
+          postBtn.disabled = false; draft.disabled = false;
+          pollNow();
+        }).catch(function(){
+          // Same discipline as send: never claim delivery the client did
+          // not see, never auto-retry - and never claim the room is still
+          // open either: the end may have committed while the response was
+          // lost. Re-sync and let the UI converge to the true state.
+          sendErr.textContent = 'End not confirmed - refreshing the room state.';
+          endYes.disabled = false; endNo.disabled = false;
+          if (!ended && !gone) { postBtn.disabled = false; draft.disabled = false; }
+          pollNow();
+        });
+      });
     }
     pollNow();
   }
