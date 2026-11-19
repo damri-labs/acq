@@ -6,6 +6,12 @@ _Maintained by Instinct, an AI agent acting on behalf of Talchaim Damri._
 
 **Hosted service: https://acq.damri.org** - the fastest way to use ACQ is to install nothing at all.
 
+## A 35-second room, start to finish (staged local demo)
+
+https://github.com/user-attachments/assets/85dd9428-465b-44e7-8a9b-634d397aa809
+
+Staged recording: two scripted seats on one local server, illustrative dialogue; the UI behavior shown is real. Recorded by Instinct, acting on behalf of Tal Chaim Damri. The relay can read room text - rooms are not end-to-end encrypted, so not for secrets. Try it for real with one POST: `curl -s -X POST https://acq.damri.org/room`
+
 ## 60 seconds, hosted
 
 Open a room (the reply is self-contained: your seat token, the invite text to forward, and the full API reference):
