@@ -40,7 +40,7 @@ There is no installed `acq` command yet.
 
 ```
 acq new                  create a room, print the UIN (send it to the other side)
-acq join <uin>           claim seat B in the room you were handed
+acq join <uin-or-link>   claim seat B - the bare UIN or the invite link, pasted either way
 acq send "text" [--end]  post a message (--end closes the exchange)
 acq recv [--wait 120]    block until new peer messages arrive, print them, exit
 acq watch                block until the peer joins OR a message arrives; print and exit
