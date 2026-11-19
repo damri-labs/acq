@@ -90,6 +90,10 @@
     max-width: 680px; margin: 8px auto 0; min-height: 16px;
     font: 12px/1.4 ui-monospace, Menlo, monospace; color: #e0a34a;
   }
+  #draft-note {
+    max-width: 680px; margin: 8px auto 0;
+    font: 12px/1.4 ui-monospace, Menlo, monospace; color: #e0a34a;
+  }
   .metahint { color: var(--dim); font-size: 13px; margin: -6px 0 14px; }
   #invite { padding: 30px 0; }
   #idfail { padding: 20px 0; color: var(--dim); }
@@ -169,10 +173,11 @@
     <button id="end-no" type="button">Cancel</button>
   </div>
   <div class="row">
-    <input id="draft" type="text" placeholder="Message the room..." autocomplete="off" maxlength="65536">
+    <input id="draft" type="text" placeholder="Message the room..." autocomplete="off" maxlength="65536" aria-describedby="draft-note">
     <button id="post" type="button">Send</button>
     <button id="end" type="button" hidden>End room</button>
   </div>
+  <div id="draft-note" hidden role="status" aria-live="polite"></div>
   <div id="send-err"></div>
 </div>
 <script>
@@ -334,6 +339,27 @@
       var draft = document.getElementById('draft');
       var postBtn = document.getElementById('post');
       var sendErr = document.getElementById('send-err');
+      var draftNote = document.getElementById('draft-note');
+      // The server accepts at most 65536 BYTES per message (maxMsgSize).
+      // maxlength counts UTF-16 code units, which under-counts UTF-8 text
+      // whose characters take several bytes each (Hebrew 2, most emoji 4):
+      // the browser lets a draft through that the server must reject, and
+      // the generic send error cannot say why. Never rewrite what the user
+      // typed: while the draft exceeds 65536 bytes, show its byte size and
+      // hold the send (click AND Enter) until it fits. maxlength stays as
+      // the native backstop for single-byte text, where units equal bytes.
+      var draftEnc = new TextEncoder();
+      function draftBytes(){ return draftEnc.encode(draft.value).length; }
+      function draftOverCap(){
+        if (ended || gone || draft.disabled) return false;
+        var n = draftBytes();
+        if (n <= 65536) { draftNote.hidden = true; draftNote.textContent = ''; postBtn.disabled = false; return false; }
+        draftNote.textContent = 'This message is ' + n + ' bytes in UTF-8 (some characters take several bytes each); a room message carries at most 65536 bytes. It cannot be sent as entered - shorten it by ' + (n - 65536) + ' bytes.';
+        draftNote.hidden = false;
+        postBtn.disabled = true;
+        return true;
+      }
+      draft.addEventListener('input', draftOverCap);
       // Seat posts authenticate with the bearer token; the owner posts with
       // the same-origin session cookie plus the X-ACQ-Owner header the
       // server requires on the cookie path (cross-origin simple requests
@@ -351,6 +377,7 @@
       function post(){
         var text = draft.value;
         if (!text.trim() || postBtn.disabled || ended || gone) return;
+        if (draftOverCap()) return;
         // Lock BOTH controls for the flight: typing while a send is
         // pending must not lose text when the pending send succeeds.
         postBtn.disabled = true;
@@ -400,7 +427,7 @@
           // only what the client knows, and never auto-retry a send.
           sendErr.textContent = 'Delivery not confirmed - your text is kept.';
         }).then(function(){
-          if (!ended && !gone) { postBtn.disabled = false; draft.disabled = false; }
+          if (!ended && !gone) { draft.disabled = false; draftOverCap(); }
         });
       }
       postBtn.addEventListener('click', post);
