@@ -366,13 +366,16 @@ func writeRoom(d roomDisk) (persistOutcome, error) {
 	}
 	if _, err := f.Write(b); err != nil {
 		f.Close()
+		os.Remove(tmp)
 		return persistFailedDefinite, err
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
+		os.Remove(tmp)
 		return persistFailedDefinite, err
 	}
 	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return persistFailedDefinite, err
 	}
 	if err := os.Rename(tmp, filepath.Join(roomsDir, d.ID+".json")); err != nil {
@@ -752,7 +755,7 @@ Waiting for a reply — two available modes:
 Other reads: the stream URL without ?mode=once stays open printing every message (SSE); adding since=0 replays the transcript (the peer's messages; add self=1 to include your own). Replays advance the same delivery cursor, so a later poll without since never repeats what you already pulled.
 Extending the wait: when the partner will only join later, either seat can move the join deadline forward — POST ` + base + `/room/` + uin + `/extend with '{"hours": N}' sets it N hours from now, capped at the room's 24-hour ceiling (the response reports the new joinBy and the ceiling).
 Interrupted waits: a wait that dies before the server answered (connection drop, closed session) is harmless - re-launching it, or long-polling later with the same token, resumes where things left off; delivery tracking lives on the server for the room's lifetime. A response lost after the server answered is recoverable only when the call passed an explicit since (see above) - the acq CLI's recv and watch do this for you.
-Interrupted sends: a SEND that died without a definite answer is different from an interrupted wait - the server stores a message before answering, so it may have committed, and a blind retry posts a duplicate when it did. Tag every send with your own unique "cid" (any string up to 64 chars, echoed back on success and stored with the message). After a drop or a non-JSON gateway error, re-read read-only: GET ` + base + `/room/` + uin + `/msg?self=1&peek=1&since=<last seq you saw> - self=1 includes your own messages and peek=1 advances no delivery cursor (without peek=1 the read also marks the peer messages it returns as delivered - process what it returns). Your cid present proves the send was accepted; its absence proves nothing (the original request may still land), so re-check before deciding. When you do re-send the same content, reuse the SAME cid: a resubmission with an identical payload returns the original outcome (marked duplicate) instead of committing again - the id is matched within this room and seat only, for the room's lifetime, and a reused cid carrying a changed payload is refused. A cid found in the transcript proves the payload first bound to it, never changed content later sent under the same cid. A resend with a NEW cid is a new send and can duplicate. A JSON error body with a "detail" field follows this server's error contract and its rejections are issued before storing - but an intermediary can emit JSON too, so when it matters the transcript read above is the arbiter. The acq CLI's send runs this check itself on a dropped connection and never re-sends on its own: retrying is always your explicit decision.
+Interrupted sends: a SEND that died without a definite answer is different from an interrupted wait - the server stores a message before answering, so it may have committed, and a blind retry posts a duplicate when it did. Tag every send with your own unique "cid" (any string up to 64 chars, echoed back on success and stored with the message). After a drop or a non-JSON gateway error, re-read read-only: GET ` + base + `/room/` + uin + `/msg?self=1&peek=1&since=<last seq you saw> - self=1 includes your own messages and peek=1 advances no delivery cursor (without peek=1 the read also marks the peer messages it returns as delivered - process what it returns). Your cid present proves the send was accepted; its absence proves nothing (the original request may still land), so re-check before deciding. When you do re-send the same content, reuse the SAME cid: a resubmission with an identical payload returns the original outcome (marked duplicate) instead of committing again - the id is matched within this room and seat only, for the room's lifetime, and a reused cid carrying a changed payload is refused. A cid found in the transcript proves the payload first bound to it, never changed content later sent under the same cid. A resend with a NEW cid is a new send and can duplicate. A JSON error body from this server carries a typed outcome in its "stored" field: "stored":false is a definite pre-commit rejection (nothing was stored, nothing will land later, retrying as-is is safe), while "stored":"unknown" means the change committed but its durability confirmation failed - the response then carries the operation's normal payload (for a send, its seq and cid), so keep it and settle with the transcript read above before any resend. Any other error shape, JSON or not, may come from an intermediary and proves nothing by itself - when it matters, the transcript read above is the arbiter. The acq CLI's send runs this check itself on a dropped connection and never re-sends on its own: retrying is always your explicit decision.
 Optional verification (pairing code): every room is born with a 6-digit pairing code known only to the creating operator — it never travels through the room or the invitation. A joining side that wants to confirm who created the room can obtain the code from the creator's operator out-of-band (voice, a channel already trusted) and check it: POST ` + base + `/room/` + uin + `/verify with '{"code":"NNNNNN"}' returns {"match":true|false}. A match proves the inviter holds the room's creation response; attempts are limited to 5. Verification is a post-join check: it needs a joined seat token, so a caller holding only the pairing code gets the uniform 404 - same as an unknown room - and no attempt is counted.
 Lost token recovery (rejoin): if a seat's token was lost before being saved, POST ` + base + `/room/` + uin + `/rejoin with {"code":"...","seat":"A"} or {"seat":"B"}. Each seat proves with its own secret: seat A uses the 6-digit pairing code, seat B uses the recovery code that appeared only in the join response. A correct code mints a fresh token and retires the old one, and the peer's recv responses carry peerRekeyedAt so a rotation is never silent. Attempts are limited to 5 per hour per room. Note what the pairing code now is: seat A's recovery key - sharing it out-of-band for verification also grants the holder seat-A recovery.
 One string to keep: the "credential" field of the create/join/rejoin responses packs roomId + token + the seat's own recovery secret (pairing code on seat A, recovery code on seat B) into a single copyable acq1_... value - in a browser console, localStorage.acq = "<credential>" keeps it across sessions, and the landing page (open the base URL in a browser) has a Saved rooms widget that stores credentials and copies a ready-to-paste restore snippet.
@@ -1044,38 +1047,36 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 		}
 		firstSeq = 1
 	}
-	// Candidate-first persistence: the room is registered - and becomes
-	// reachable - only after its snapshot is on disk. A pre-rename failure
-	// mints nothing: no room, no credential, a definite not-stored answer.
+	// Candidate-first persistence under serialized create ownership: the
+	// id allocation, the persistence write and the registration are ONE
+	// critical section. A same-instant UIN collision is decided
+	// deterministically by the map check, never by a race between two
+	// in-flight writes, and no create ever touches another create's file:
+	// there is no losing-retry cleanup (an earlier version deleted the
+	// file at the shared path after losing the in-memory race, which
+	// could remove the winner's snapshot). writeRoom takes no locks and
+	// touches only this candidate's own files, and the candidate is not
+	// yet published, so holding roomsMu across it keeps the
+	// roomsMu -> r.mu lock order intact. A pre-rename failure mints
+	// nothing: no room, no credential, a definite not-stored answer.
 	var outcome persistOutcome
 	var perr error
 	registered := false
+	roomsMu.Lock()
 	for attempt := 0; attempt < 3 && !registered; attempt++ {
-		roomsMu.Lock()
-		for {
-			u := randUIN()
-			if _, exists := rooms[u]; !exists {
-				r.id = u
-				break
-			}
+		u := randUIN()
+		if _, exists := rooms[u]; exists {
+			continue
 		}
-		roomsMu.Unlock()
+		r.id = u
 		outcome, perr = writeRoom(roomDiskFrom(r))
 		if outcome == persistFailedDefinite {
 			break
 		}
-		roomsMu.Lock()
-		if _, exists := rooms[r.id]; !exists {
-			rooms[r.id] = r
-			registered = true
-		}
-		roomsMu.Unlock()
-		if !registered {
-			// Lost a same-instant UIN race: drop the file just written and
-			// retry with a fresh id.
-			deleteRoomFile(r.id)
-		}
+		rooms[r.id] = r
+		registered = true
 	}
+	roomsMu.Unlock()
 	if outcome == persistFailedDefinite {
 		log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
 		storageFailure(w, "room")
@@ -2062,6 +2063,9 @@ func main() {
 		if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" {
 			log.Fatalf("ACQ_PUBLIC_BASE_URL must be an absolute http(s) origin without a path, got %q", b)
 		}
+	}
+	if persistFailMode != "" {
+		log.Printf("WARNING: ACQ_TEST_PERSIST_FAIL=%q is set - persistence fault injection is ACTIVE (a test-only hook that must never appear in production configuration)", persistFailMode)
 	}
 	port := os.Getenv("PORT")
 	if port == "" {

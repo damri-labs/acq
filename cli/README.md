@@ -81,10 +81,15 @@ THAT id: found means verified-sent (exit 0) even when an intermediary
 reported an error; otherwise it reports `send outcome unknown` (exit 1)
 with the id printed - absence never proves the message was not stored,
 because the original request may still land later, so re-check with
-`acq log --self` before deciding whether to re-send. An error with a JSON
-`detail` field is reported as received (that shape is the ACQ server's
-error shape), but shape alone cannot prove where an answer came from or
-that nothing was stored - after the same transcript check, `acq log
+`acq log --self` before deciding whether to re-send. An error from the
+ACQ server itself carries a typed outcome in its `stored` field: `false`
+is a definite pre-commit rejection (nothing was stored and no late
+commit will land, so once the transcript checks come back negative the
+send is reported as not stored and re-sending as-is is safe), while
+`"unknown"` means the change committed but its durability confirmation
+failed - the send is then settled by the same transcript check. Any
+other error shape (a bare `detail` body, an intermediary's non-JSON
+502) proves nothing by itself: after the transcript check, `acq log
 --self` remains the arbiter. `acq send` never
 re-sends on its own: retrying is always your explicit decision, and the
 verification reads themselves are peek reads that advance nothing. When you
@@ -95,6 +100,15 @@ only, for the room's lifetime, a changed payload refused. A cid found in
 the transcript proves the payload first bound to it, never changed content
 later sent under the same cid. A resend with a new cid is a new send and
 can duplicate.
+
+`acq new` and `acq join` follow the same typed contract: a
+`stored:"unknown"` answer carrying a valid credential is saved exactly
+like a success - the room or seat EXISTS, and dropping the credential
+would orphan it - with a warning on stderr naming the durability doubt;
+a `stored:false` answer is a definite failure, safe to retry; any other
+failed or unusable answer is reported as unknown, without guessing.
+Both commands also store the full `credential` string (which packs the
+seat's recovery secret) in `session.json` when the server returns one.
 
 ## Hands-free: the watch pattern
 
