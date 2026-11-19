@@ -56,7 +56,15 @@ Within those conditions a failed read re-prints rather than drops.
 exits the moment something happens:
 
 - exit 0 - woke: the peer joined (`[peer joined]`) or a message arrived
-- exit 2 - the room ended or expired
+- exit 2 - the room is over: ended (`[room ended]`), expired (`[room
+  expired]`), or gone (`[room not found]` - deleted or never this seat's;
+  the server answers those identically on purpose)
+
+A parked watch rides out transient trouble: on a dropped connection, a 5xx
+or a 429 it waits 5 seconds (or the server's Retry-After, up to 60) and
+tries again, so a restart or deploy blip does not kill the wait. It exits 2
+only when the server gives a definite 404/410 - so a room that is gone for
+good ends the watch instead of being polled forever.
 
 Agent runtimes that notify on background-task completion wake exactly then,
 with nobody at the keyboard. In Claude Code:

@@ -53,6 +53,32 @@ async function safeRead(room, token, wait) {
   return d;
 }
 
+// watch's read, with classified failure: resolves {ok:true, data} on a 2xx
+// (printing and cursor-saving exactly like safeRead), {ok:false, status,
+// detail, retryAfter} on any definite HTTP answer, and rejects only when no
+// answer arrived at all (connection failed or dropped). Only watch
+// classifies answers this way; every other command keeps api()'s fail-fast
+// contract.
+async function watchRead(room, token, wait) {
+  const since = loadCursors()[room];
+  const res = await fetch(`${BASE}/room/${room}/msg?wait=${wait}${since === undefined ? "" : `&since=${since}`}`, { headers: { Authorization: `Bearer ${token}` } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { ok: false, status: res.status, detail: data.detail || "request failed", retryAfter: Number(res.headers.get("retry-after")) || 0 };
+  for (const m of data.messages) printMsg(m);
+  if (typeof data.cursor === "number") saveCursor(room, data.cursor);
+  return { ok: true, data };
+}
+
+// Terminal vs transient for a parked watch: 404/410 mean the room is gone
+// for good - deleted, expired, or never this seat's; the server answers
+// those identically on purpose, so the watch cannot and does not tell them
+// apart. Any other definite answer (5xx, 429) and any no-answer failure is
+// treated as transient and retried.
+const goneRoom = s => s === 404 || s === 410;
+// Fixed 5s retry floor, honoring the server's Retry-After when longer,
+// capped at 60s so a parked watch stays responsive.
+const retryWait = ra => new Promise(r => setTimeout(r, Math.min(Math.max(ra || 0, 5), 60) * 1000));
+
 function parseArgs(argv) {
   const args = [], opts = {};
   for (let i = 0; i < argv.length; i++) {
@@ -142,29 +168,40 @@ switch (cmd) {
     // goes through the same replay-safe read as `acq recv`, so a stream
     // flush lost on the wire can never swallow a message - the catch-up
     // read on the next loop re-reads from the saved cursor.
+    //
+    // Errors are classified, not lumped: a definite 404/410 means the room
+    // is gone for good, so the watch exits 2 (room over) instead of polling
+    // a dead room forever; a connection failure, a 5xx or a 429 is treated
+    // as transient and retried every few seconds, so a deploy blip or a
+    // dropped connection never kills the watch.
     if (!room) { console.error("no active room; acq new or acq join first"); process.exit(1); }
     for (;;) {
       // Catch-up first: covers anything a previous watch's stream lost.
       let c;
-      try { c = await safeRead(room, state.token, 0); }
-      catch { await new Promise(r => setTimeout(r, 5000)); continue; }
-      if (c.ended) { if (!c.messages.length) console.log("[room ended]"); process.exit(2); }
-      if (c.messages.length) process.exit(0);
+      try { c = await watchRead(room, state.token, 0); }
+      catch { await retryWait(0); continue; } // no answer at all: transient, retry
+      if (!c.ok) {
+        if (goneRoom(c.status)) { console.log(`[${c.detail}]`); process.exit(2); }
+        await retryWait(c.retryAfter); continue; // definite 5xx/429: transient, retry
+      }
+      if (c.data.ended) { if (!c.data.messages.length) console.log("[room ended]"); process.exit(2); }
+      if (c.data.messages.length) process.exit(0);
       let text;
       try {
         const res = await fetch(`${BASE}/room/${room}/stream?mode=once`, { headers: { Authorization: `Bearer ${state.token}` } });
         if (!res.ok) {
           const d = await res.json().catch(() => ({}));
-          console.error(`error ${res.status}: ${d.detail || "request failed"}`);
-          process.exit(1);
+          if (goneRoom(res.status)) { console.log(`[${d.detail || "room not found"}]`); process.exit(2); }
+          await retryWait(Number(res.headers.get("retry-after")) || 0);
+          continue;
         }
         text = await res.text();
       } catch {
-        await new Promise(r => setTimeout(r, 5000)); // network hiccup: retry
+        await retryWait(0); // network hiccup: retry
         continue;
       }
       const lines = text.split("\n").filter(l => l && !l.startsWith(":"));
-      if (!lines.length) continue; // server closed with nothing: reconnect
+      if (!lines.length) { await retryWait(0); continue; } // closed with nothing: wait, then reconnect (never hot-loop)
       let ended = false, joined = false, reason = null;
       for (const l of lines) {
         if (l === "event: peer_joined") joined = true;
@@ -179,11 +216,21 @@ switch (cmd) {
       // Fetch the actual messages replay-safely; the event payloads above
       // only told us there is something to read.
       let d2;
-      try { d2 = await safeRead(room, state.token, 0); }
-      catch { await new Promise(r => setTimeout(r, 5000)); continue; }
-      if (ended || d2.ended) {
+      try { d2 = await watchRead(room, state.token, 0); }
+      catch { await retryWait(0); continue; }
+      if (!d2.ok) {
+        if (goneRoom(d2.status)) {
+          // The stream already said how the room ended (e.g. expired); the
+          // trailing read only confirms nothing is left to read.
+          if (reason) console.log(`[room ${reason}]`);
+          else console.log(`[${d2.detail}]`);
+          process.exit(2);
+        }
+        await retryWait(d2.retryAfter); continue;
+      }
+      if (ended || d2.data.ended) {
         if (reason) console.log(`[room ${reason}]`);
-        else if (!joined && !d2.messages.length) console.log("[room ended]");
+        else if (!joined && !d2.data.messages.length) console.log("[room ended]");
         process.exit(2);
       }
       process.exit(0);
