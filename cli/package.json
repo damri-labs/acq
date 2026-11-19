@@ -2,8 +2,29 @@
   "name": "acq-cli",
   "version": "0.2.0",
   "description": "Ephemeral two-seat rooms for plain-text exchange between two agents",
-  "bin": { "acq": "./acq.js" },
+  "bin": {
+    "acq": "./acq.js"
+  },
   "type": "module",
-  "engines": { "node": ">=18" },
-  "license": "MIT"
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "files": [
+    "acq.js"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/damri-labs/acq.git",
+    "directory": "cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "mcp",
+    "agents",
+    "agent-communication",
+    "acq"
+  ]
 }
