@@ -76,16 +76,31 @@ type Msg struct {
 }
 
 type Room struct {
-	mu           sync.Mutex
-	id           string
-	tokenA       string
-	tokenB       string
-	created      time.Time
-	pairedAt     time.Time
-	lastMsg      time.Time
-	msgs         []Msg
-	ended        bool
-	notify       chan struct{}
+	mu       sync.Mutex
+	id       string
+	tokenA   string
+	tokenB   string
+	created  time.Time
+	pairedAt time.Time
+	lastMsg  time.Time
+	msgs     []Msg
+	ended    bool
+	notify   chan struct{}
+	// reaped marks a room the janitor or the access path has already
+	// unmapped and tombstoned for expiry. It is set under r.mu, and the
+	// file deletion is attempted in the same critical section, so a
+	// handler that resolved the room before the reap serializes with
+	// it. Two in-process cases: the handler commits its write BEFORE
+	// the reap takes the lock (an acknowledged write the reap then
+	// deletes with the room, ordinary expiry semantics), or the reap is
+	// first and the handler sees reaped at its precheck, under the same
+	// lock it holds through its persistence: it rejects without
+	// writing, so a handler that resolved an already-reaped room never
+	// persists expired content after the reap. The reaper's deletion is
+	// attempted, not guaranteed: a failed delete leaves residue until a
+	// later successful cleanup, and restart cleanup is itself fallible,
+	// so no bound on residue lifetime is promised.
+	reaped       bool
 	deliveredA   int
 	deliveredB   int
 	joinDeadline time.Time
@@ -420,8 +435,13 @@ func storageAmbiguous(w http.ResponseWriter, detail string, payload any) {
 	jsonOut(w, http.StatusInternalServerError, fields)
 }
 
+// osRemove is the file-deletion seam: tests stub it to force a deletion
+// failure deterministically, under any test identity (directory permissions
+// would not fail reliably for every user the tests might run as).
+var osRemove = os.Remove
+
 func deleteRoomFile(id string) error {
-	return os.Remove(filepath.Join(roomsDir, id+".json"))
+	return osRemove(filepath.Join(roomsDir, id+".json"))
 }
 
 func loadRooms() {
@@ -715,17 +735,22 @@ func getRoom(uin string) *Room {
 	// (lock order is roomsMu -> r.mu everywhere).
 	r.mu.Lock()
 	exp := r.expired(time.Now())
-	r.mu.Unlock()
 	if exp {
+		r.reaped = true
 		delete(rooms, uin)
 		addTombstone(uin)
 		// Delete the file too: the janitor only reaps rooms still in the
 		// map, so an access in the window between expiry and its 30s pass
 		// would otherwise leave the room's messages on disk until restart,
-		// contradicting "messages are deleted on expiry".
+		// contradicting "messages are deleted on expiry". The deletion
+		// stays inside r.mu so it serializes with a late in-flight writer
+		// (see reaped).
 		if err := deleteRoomFile(uin); err != nil {
 			log.Printf("room_delete_error id=%s... err=%v", uin[:4], err)
 		}
+	}
+	r.mu.Unlock()
+	if exp {
 		return nil
 	}
 	return r
@@ -1179,6 +1204,13 @@ func handleJoin(w http.ResponseWriter, req *http.Request, r *Room) {
 		kind = "human"
 	}
 	r.mu.Lock()
+	if r.reaped {
+		// Already reaped for expiry: 410, same as the router's tombstone
+		// answer; nothing is persisted for an expired room.
+		r.mu.Unlock()
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
+		return
+	}
 	if !r.pairedAt.IsZero() {
 		r.mu.Unlock()
 		log.Printf("join_failed uin=%s... reason=already_claimed", r.id[:4])
@@ -1251,6 +1283,106 @@ func handleJoin(w http.ResponseWriter, req *http.Request, r *Room) {
 // Attempts use their own per-room counter with an hourly window - a stranger
 // who only knows the UIN can slow recovery down but cannot lock it forever,
 // and cannot touch the permanent verify lockout (verify needs a seat token).
+// handleVerify checks a presented pair code against the room's, rate-limited
+// per room. A correct verify mints nothing, so only a failed attempt writes.
+func handleVerify(w http.ResponseWriter, req *http.Request, r *Room) {
+	seat := seatFor(r, req)
+	if seat == "" {
+		notAvailable(w, req)
+		return
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	json.NewDecoder(req.Body).Decode(&body)
+	r.mu.Lock()
+	match := r.verifyFails < 5 && codeMatch(body.Code, r.pairCode)
+	if !match {
+		r.verifyFails++
+		// The attempt counter is kept in process regardless; its
+		// persistence is best-effort. Accepted residual: a restart landing
+		// between the increment and a failed save resets the counter.
+		// A room already reaped for expiry is not written back to disk.
+		if !r.reaped {
+			candidate := roomDiskFrom(r)
+			if _, perr := writeRoom(candidate); perr != nil {
+				log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+			}
+		}
+	}
+	fails := r.verifyFails
+	r.mu.Unlock()
+	log.Printf("verify id=%s… by=%s match=%v fails=%d", r.id[:4], seat, match, fails)
+	jsonOut(w, http.StatusOK, map[string]any{"match": match})
+}
+
+// handleExtend moves a room's join deadline out, capped by the absolute TTL.
+func handleExtend(w http.ResponseWriter, req *http.Request, r *Room) {
+	seat := seatFor(r, req)
+	if seat == "" {
+		notAvailable(w, req)
+		return
+	}
+	var body struct {
+		Hours float64 `json:"hours"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Hours <= 0 {
+		body.Hours = 2
+	}
+	if body.Hours > 24 {
+		body.Hours = 24
+	}
+	r.mu.Lock()
+	if r.reaped {
+		// Already reaped for expiry: 410, same as the router's tombstone
+		// answer; nothing is persisted for an expired room.
+		r.mu.Unlock()
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
+		return
+	}
+	if r.permanent {
+		r.mu.Unlock()
+		// Same keys as the guest-room response; zero values mark
+		// "no deadline" so clients can rely on one schema.
+		jsonOut(w, http.StatusOK, map[string]any{"permanent": true, "joinBy": 0, "expiresAt": 0, "ceiling": 0})
+		return
+	}
+	abs := r.created.Add(absoluteTTL)
+	target := time.Now().Add(time.Duration(body.Hours * float64(time.Hour)))
+	if target.After(abs) {
+		target = abs
+	}
+	// Candidate-first persistence, same contract as the other
+	// mutations: a pre-rename failure changes nothing and can be
+	// retried; a post-rename dir-sync failure commits and reports an
+	// unknown outcome (settle it with a room-status read).
+	candidate := roomDiskFrom(r)
+	if candidate.JoinDeadline.Before(target) {
+		candidate.JoinDeadline = target
+	}
+	outcome, perr := writeRoom(candidate)
+	if outcome == persistFailedDefinite {
+		r.mu.Unlock()
+		log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+		storageFailure(w, "extension")
+		return
+	}
+	r.joinDeadline = candidate.JoinDeadline
+	joinBy := r.joinDeadline.Unix()
+	exp := r.expiresAt().Unix()
+	r.mu.Unlock()
+	if outcome == persistAmbiguous {
+		log.Printf("room_save_ambiguous id=%s... err=%v", r.id[:4], perr)
+	}
+	log.Printf("room_extended id=%s… by=%s hours=%.1f", r.id[:4], seat, body.Hours)
+	resp := map[string]any{"joinBy": joinBy, "expiresAt": exp, "ceiling": abs.Unix()}
+	if outcome == persistAmbiguous {
+		storageAmbiguous(w, "extension stored but its durability confirmation failed; re-read the room status before relying on it", resp)
+		return
+	}
+	jsonOut(w, http.StatusOK, resp)
+}
+
 func handleRejoin(w http.ResponseWriter, req *http.Request, r *Room) {
 	var body struct {
 		Code string `json:"code"`
@@ -1294,13 +1426,25 @@ func handleRejoin(w http.ResponseWriter, req *http.Request, r *Room) {
 		// its storage state to a stranger). Accepted residual: a restart
 		// landing between the increment and a failed save resets the
 		// counter - the in-process cap still bounds attempts until then.
-		candidate := roomDiskFrom(r)
-		if _, perr := writeRoom(candidate); perr != nil {
-			log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+		// A room already reaped for expiry is not written back to disk.
+		if !r.reaped {
+			candidate := roomDiskFrom(r)
+			if _, perr := writeRoom(candidate); perr != nil {
+				log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+			}
 		}
 		r.mu.Unlock()
 		log.Printf("rejoin_failed uin=%s... seat=%s fails=%d", r.id[:4], seat, fails)
 		notAvailable(w, req)
+		return
+	}
+	if r.reaped {
+		// Already reaped for expiry: 410, same as the router's tombstone
+		// answer; nothing is persisted for an expired room. Scoped to the
+		// rotation path: the failed-code path above keeps its uniform
+		// not-found (a distinct error would disclose the room).
+		r.mu.Unlock()
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
 		return
 	}
 	// Candidate-first persistence for the rotation: a pre-rename failure
@@ -1422,6 +1566,15 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 		return
 	}
 	r.mu.Lock()
+	if r.reaped {
+		// Already reaped for expiry: same answer the router gives when
+		// getRoom returns nil for a tombstoned room. Checked first under
+		// the continuously held r.mu, before any persistence, so no
+		// expired content is written back to disk.
+		r.mu.Unlock()
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
+		return
+	}
 	defer r.mu.Unlock()
 	if body.Cid != "" {
 		// Idempotent resubmission, scoped to this room and seat: a send
@@ -1896,90 +2049,9 @@ func handleRoom(w http.ResponseWriter, req *http.Request) {
 	case parts[2] == "rejoin" && req.Method == http.MethodPost:
 		handleRejoin(w, req, r)
 	case parts[2] == "verify" && req.Method == http.MethodPost:
-		seat := seatFor(r, req)
-		if seat == "" {
-			notAvailable(w, req)
-			return
-		}
-		var body struct {
-			Code string `json:"code"`
-		}
-		json.NewDecoder(req.Body).Decode(&body)
-		r.mu.Lock()
-		match := r.verifyFails < 5 && codeMatch(body.Code, r.pairCode)
-		if !match {
-			r.verifyFails++
-			// The attempt counter is kept in process regardless; its
-			// persistence is best-effort. A correct verify mints nothing,
-			// so only a failed attempt writes. Accepted residual: a
-			// restart landing between the increment and a failed save
-			// resets the counter.
-			candidate := roomDiskFrom(r)
-			if _, perr := writeRoom(candidate); perr != nil {
-				log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
-			}
-		}
-		fails := r.verifyFails
-		r.mu.Unlock()
-		log.Printf("verify id=%s… by=%s match=%v fails=%d", r.id[:4], seat, match, fails)
-		jsonOut(w, http.StatusOK, map[string]any{"match": match})
+		handleVerify(w, req, r)
 	case parts[2] == "extend" && req.Method == http.MethodPost:
-		seat := seatFor(r, req)
-		if seat == "" {
-			notAvailable(w, req)
-			return
-		}
-		var body struct {
-			Hours float64 `json:"hours"`
-		}
-		if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Hours <= 0 {
-			body.Hours = 2
-		}
-		if body.Hours > 24 {
-			body.Hours = 24
-		}
-		r.mu.Lock()
-		if r.permanent {
-			r.mu.Unlock()
-			// Same keys as the guest-room response; zero values mark
-			// "no deadline" so clients can rely on one schema.
-			jsonOut(w, http.StatusOK, map[string]any{"permanent": true, "joinBy": 0, "expiresAt": 0, "ceiling": 0})
-			return
-		}
-		abs := r.created.Add(absoluteTTL)
-		target := time.Now().Add(time.Duration(body.Hours * float64(time.Hour)))
-		if target.After(abs) {
-			target = abs
-		}
-		// Candidate-first persistence, same contract as the other
-		// mutations: a pre-rename failure changes nothing and can be
-		// retried; a post-rename dir-sync failure commits and reports an
-		// unknown outcome (settle it with a room-status read).
-		candidate := roomDiskFrom(r)
-		if candidate.JoinDeadline.Before(target) {
-			candidate.JoinDeadline = target
-		}
-		outcome, perr := writeRoom(candidate)
-		if outcome == persistFailedDefinite {
-			r.mu.Unlock()
-			log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
-			storageFailure(w, "extension")
-			return
-		}
-		r.joinDeadline = candidate.JoinDeadline
-		joinBy := r.joinDeadline.Unix()
-		exp := r.expiresAt().Unix()
-		r.mu.Unlock()
-		if outcome == persistAmbiguous {
-			log.Printf("room_save_ambiguous id=%s... err=%v", r.id[:4], perr)
-		}
-		log.Printf("room_extended id=%s… by=%s hours=%.1f", r.id[:4], seat, body.Hours)
-		resp := map[string]any{"joinBy": joinBy, "expiresAt": exp, "ceiling": abs.Unix()}
-		if outcome == persistAmbiguous {
-			storageAmbiguous(w, "extension stored but its durability confirmation failed; re-read the room status before relying on it", resp)
-			return
-		}
-		jsonOut(w, http.StatusOK, resp)
+		handleExtend(w, req, r)
 	case parts[2] == "feedback" && req.Method == http.MethodPost:
 		seat := seatFor(r, req)
 		if seat == "" {
@@ -2014,31 +2086,43 @@ func handleRoom(w http.ResponseWriter, req *http.Request) {
 
 func janitor() {
 	for range time.Tick(30 * time.Second) {
-		now := time.Now()
-		roomsMu.Lock()
-		for u, r := range rooms {
-			r.mu.Lock()
-			exp := r.expired(now)
-			n := len(r.msgs)
-			r.mu.Unlock()
-			if exp {
-				log.Printf("room_expired id=%s… msgs=%d", u[:4], n)
-				delete(rooms, u)
-				addTombstone(u)
-				if err := deleteRoomFile(u); err != nil {
-					log.Printf("room_delete_error id=%s... err=%v", u[:4], err)
-				}
-			}
-		}
-		roomsMu.Unlock()
-		tombMu.Lock()
-		for u, t := range tombstones {
-			if now.Sub(t) > 48*time.Hour {
-				delete(tombstones, u)
-			}
-		}
-		tombMu.Unlock()
+		sweepExpired(time.Now())
 	}
+}
+
+// sweepExpired reaps every expired room (unmap, tombstone, delete the file
+// inside the r.mu hold so the reap serializes with a late in-flight writer;
+// see reaped) and prunes old tombstones. Factored out of the janitor's tick
+// so tests drive the exact production reap deterministically.
+func sweepExpired(now time.Time) {
+	roomsMu.Lock()
+	for u, r := range rooms {
+		r.mu.Lock()
+		exp := r.expired(now)
+		n := len(r.msgs)
+		if exp {
+			r.reaped = true
+			log.Printf("room_expired id=%s… msgs=%d", u[:4], n)
+			delete(rooms, u)
+			addTombstone(u)
+			// Deletion inside r.mu serializes with a late in-flight
+			// writer holding this room (see reaped). A failed delete is
+			// logged and leaves residue: no cleanup here or at restart is
+			// guaranteed, so no bound on the residue's lifetime is promised.
+			if err := deleteRoomFile(u); err != nil {
+				log.Printf("room_delete_error id=%s... err=%v", u[:4], err)
+			}
+		}
+		r.mu.Unlock()
+	}
+	roomsMu.Unlock()
+	tombMu.Lock()
+	for u, t := range tombstones {
+		if now.Sub(t) > 48*time.Hour {
+			delete(tombstones, u)
+		}
+	}
+	tombMu.Unlock()
 }
 
 // handleFeedback routes /feedback: POST is the public, rate-limited path for
