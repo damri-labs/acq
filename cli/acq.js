@@ -4,6 +4,22 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+
+// Join accepts the invite in any form our docs hand out: the bare UIN or
+// the invite link. The server itself normalizes UIN case and hyphens; this
+// only strips the URL wrapper (scheme, host, the /room/ path, query,
+// trailing slashes) so a pasted link reaches the same endpoint as the bare
+// code instead of 404ing on a path the server can never match.
+function joinArgToUin(a) {
+  const s = (a || "").trim();
+  if (!s || !s.includes("/")) return s;
+  const bare = s.split(/[?#]/)[0].replace(/\/+$/, "");
+  const parts = bare.split("/").filter(Boolean);
+  const i = parts.findIndex(p => p.toLowerCase() === "room");
+  const cand = i >= 0 && parts[i + 1] ? parts[i + 1] : parts[parts.length - 1];
+  return (cand || "").toLowerCase() === "join" ? "" : cand;
+}
+
 const BASE = process.env.ACQ_SERVER || "https://acq.damri.org";
 const DIR = join(homedir(), ".config", "acq");
 const FILE = join(DIR, "session.json");
@@ -207,8 +223,8 @@ switch (cmd) {
     break;
   }
   case "join": {
-    const uin = args[1];
-    if (!uin) { console.error("usage: acq join <uin>"); process.exit(1); }
+    const uin = joinArgToUin(args[1]);
+    if (!uin) { console.error("usage: acq join <uin-or-invite-link>"); process.exit(1); }
     const d = await api("POST", `/room/${uin}/join`);
     saveState({ room: uin, token: d.token, seat: "B" });
     seedCursor(uin);
@@ -402,7 +418,7 @@ switch (cmd) {
     console.log(`acq — ephemeral two-seat rooms
 
   acq new                 create a room, print the UIN to share
-  acq join <uin>          claim seat B
+  acq join <uin-or-link>  claim seat B (bare UIN or the invite link)
   acq send "text" [--end]
   acq recv [--wait 120]   blocks; prints new messages
   acq watch               blocks; exits when the peer joins or messages (0), or the room ends (2)
