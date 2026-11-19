@@ -134,10 +134,12 @@ const retryWait = ra => new Promise(r => setTimeout(r, Math.min(Math.max(ra || 0
 function parseArgs(argv) {
   const args = [], opts = {};
   for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--") { args.push(...argv.slice(i + 1)); break; } // end of flags: the rest is positional, even dash-leading text
     if (argv[i] === "--end") opts.end = true;
     else if (argv[i] === "--self") opts.self = true;
     else if (argv[i] === "--wait") opts.wait = Number(argv[++i]);
     else if (argv[i] === "--room") opts.room = argv[++i];
+    else if (argv[i].startsWith("--")) { console.error(`unknown flag ${argv[i]} - see acq help (use -- before text that starts with dashes)`); process.exit(1); }
     else args.push(argv[i]);
   }
   return { args, opts };

@@ -17,6 +17,11 @@
 //     CORRUPT state file fails visibly instead of being silently treated as
 //     empty: a silent cursor reset would void replay-safety and could turn a
 //     recoverable lost response into an unrecoverable loss (cases 14-17).
+//  6. Unknown --flags fail fast and loud before any state or network
+//     action: silently ignoring one lets a typo (--wiat 5) or an MCP-only
+//     flag (--since) run with defaults - demonstrated as a recv that
+//     parked the full 120s default on an unknown flag (case 18). `--`
+//     ends flag parsing for dash-leading text.
 // Run: node test-watch-session.mjs
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -487,6 +492,25 @@ function check(name, cond, extra) {
     check("per-writer temps: no temp debris", debris.length === 0, debris.join(","));
   }
   rmSync(dir, { recursive: true, force: true });
+}
+
+// Case 18: unknown --flags are rejected before any state or network
+// action. `recv --since 0` (a flag that exists only on the MCP tool) once
+// parked the full 120s default wait; a typo like --wiat would too.
+{
+  const home = makeHome();
+  const sess = { room: "R", token: "tok", seat: "A" };
+  writeSession(home, sess);
+  const stub = await startStub();
+  const r1 = await run(home, stub.port, ["recv", "--since", "0"]);
+  check("unknown flag: recv --since rejected fast, exit 1", r1.code === 1 && /--since/.test(r1.err), `code=${r1.code} err=${r1.err}`);
+  const r2 = await run(home, stub.port, ["recv", "--wiat", "5"]);
+  check("unknown flag: typo --wiat rejected, exit 1", r2.code === 1 && /--wiat/.test(r2.err), `code=${r2.code} err=${r2.err}`);
+  const r3 = await run(home, stub.port, ["send", "never-sent", "--bogus"]);
+  check("unknown flag: send --bogus rejected, exit 1", r3.code === 1 && /--bogus/.test(r3.err), `code=${r3.code} err=${r3.err}`);
+  check("unknown flags: no request reached the server", stub.queries.length === 0, stub.queries.join(","));
+  check("unknown flags: session file untouched", readSessionRaw(home) === JSON.stringify(sess), readSessionRaw(home));
+  stub.close();
 }
 
 process.exit(failures ? 1 : 0);
