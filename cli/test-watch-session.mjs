@@ -513,4 +513,46 @@ function check(name, cond, extra) {
   stub.close();
 }
 
+// Case 19: invalid --wait values are rejected before any request, and
+// accepted ones reach the server as exact decimal text. Non-numeric,
+// negative, exponent or blank input used to land as wait=0 - an instant
+// non-blocking read printing "[no new messages]": a typo looking exactly
+// like an empty room (reproduced 19.11 against a server built from current
+// source: `abc`, `3.7`, `-5`, `1e21` serialized as "1e+21", "" and " "
+// each returned immediately). The wire contract: 1-15 integer digits plus
+// an optional fractional part that rounds down; 16+ digits are rejected
+// rather than losing integer precision as a double (the server would
+// saturate such overflow to its cap, silently interpreting a typo).
+{
+  const home = makeHome();
+  const sess = { room: "R", token: "tok", seat: "A" };
+  writeSession(home, sess);
+  const stub = await startStub();
+  const r1 = await run(home, stub.port, ["recv", "--wait", "abc"]);
+  check("invalid --wait: non-numeric rejected, exit 1", r1.code === 1 && /--wait/.test(r1.err) && /abc/.test(r1.err), `code=${r1.code} err=${r1.err}`);
+  const r2 = await run(home, stub.port, ["recv", "--wait", "-5"]);
+  check("invalid --wait: negative rejected, exit 1", r2.code === 1 && /--wait/.test(r2.err), `code=${r2.code} err=${r2.err}`);
+  const r3 = await run(home, stub.port, ["recv", "--wait"]);
+  check("invalid --wait: missing value rejected, exit 1", r3.code === 1 && /--wait/.test(r3.err), `code=${r3.code} err=${r3.err}`);
+  const r4 = await run(home, stub.port, ["recv", "--wait", "1e21"]);
+  check("invalid --wait: exponent notation rejected, exit 1", r4.code === 1 && /--wait/.test(r4.err), `code=${r4.code} err=${r4.err}`);
+  const r5 = await run(home, stub.port, ["recv", "--wait", ""]);
+  check("invalid --wait: blank rejected, exit 1", r5.code === 1 && /--wait/.test(r5.err), `code=${r5.code} err=${r5.err}`);
+  const r6 = await run(home, stub.port, ["recv", "--wait", " "]);
+  check("invalid --wait: whitespace-only rejected, exit 1", r6.code === 1 && /--wait/.test(r6.err), `code=${r6.code} err=${r6.err}`);
+  const r7 = await run(home, stub.port, ["recv", "--wait", "99999999999999999999"]);
+  check("invalid --wait: 20-digit value rejected, exit 1", r7.code === 1 && /--wait/.test(r7.err), `code=${r7.code} err=${r7.err}`);
+  check("invalid --wait: no request reached the server", stub.queries.length === 0, stub.queries.join(","));
+  const r8 = await run(home, stub.port, ["recv", "--wait", "3.7"]);
+  check("fractional --wait: floors to whole seconds, reaches server as wait=3", r8.code === 0 && stub.saw("/room/R/msg?wait=3"), `code=${r8.code} queries=${stub.queries.join(",")}`);
+  const r9 = await run(home, stub.port, ["recv", "--wait", "999999999999999"]);
+  check("15-digit --wait: reaches server as exact plain digits", r9.code === 0 && stub.saw("/room/R/msg?wait=999999999999999"), `code=${r9.code} queries=${stub.queries.join(",")}`);
+  const r10 = await run(home, stub.port, ["recv", "--wait", "999999999999999.99"]);
+  check("accepted boundary: 15-digit integer part + fraction truncates textually, never rounds up", r10.code === 0 && stub.saw("/room/R/msg?wait=999999999999999") && !stub.saw("/room/R/msg?wait=1000000000000000"), `code=${r10.code} queries=${stub.queries.join(",")}`);
+  const r11 = await run(home, stub.port, ["recv", "--wait", "4503599627370495.9"]);
+  check("16-integer-digit fraction is outside the grammar: rejected, exit 1", r11.code === 1 && /--wait/.test(r11.err), `code=${r11.code} err=${r11.err}`);
+  check("--wait validation: session file untouched", readSessionRaw(home) === JSON.stringify(sess), readSessionRaw(home));
+  stub.close();
+}
+
 process.exit(failures ? 1 : 0);
