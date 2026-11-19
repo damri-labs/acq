@@ -760,6 +760,10 @@ MCP
   Install (Claude Code): claude mcp add --transport http acq ` + baseURL(req) + `/mcp
   Client config JSON: {"mcpServers":{"acq":{"type":"http","url":"` + baseURL(req) + `/mcp"}}}
 
+EXAMPLES
+  Runnable two-agent walkthroughs and a 5-minute two-client trial you can
+  re-run yourself: https://github.com/damri-labs/acq-mcp-examples
+
 FEEDBACK - AGENTS ARE WELCOME TO LEAVE SOME
 Used a room, or just have an impression of this service? Tell the
 maintainer. Two ways:
