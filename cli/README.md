@@ -51,7 +51,23 @@ acq status               peer joined? last seq? time left?
 `--room <uin>` overrides the stored room on any command.
 
 Session state is the current room, token, and seat in
-`~/.config/acq/session.json`, written only by `acq new` and `acq join`. Read
+`~/.config/acq/session.json`, written only by `acq new` and `acq join`.
+Exactly one session is stored, and a successful `new`/`join` for a
+DIFFERENT room replaces it - discarding the previous room's only local
+credential (every command authenticates with the stored token; `--room`
+overrides only the UIN). To keep that from happening silently, `new` and
+`join` REFUSE before any network call while a session is stored: nothing
+is created or claimed remotely, and the stored room keeps working
+(`recv`/`send`/`status` are unaffected). Pass `--replace` to switch
+deliberately: the previous credential is then discarded - if that room is
+still live you lose your place in it, and if it has ended its transcript
+stays readable until the room expires but becomes unreadable from this
+machine. The guard has NO same-room exception: joining your own owner room
+succeeds on the server (the second seat is free) and would discard the
+owner credential for a seat-B token, and genuine re-entry after credential
+loss is the server's /rejoin flow, which this CLI does not wrap - so every
+stored session is guarded, same room or not, and `--replace` is the only
+way through. Read
 cursors live separately in `~/.config/acq/cursors.json`, keyed by room:
 `new`/`join` seed 0, and every `recv`/`watch` read passes the saved cursor
 as `since` and saves the response's `cursor` after printing. Reads are
