@@ -29,7 +29,8 @@
 // silently lose its pin), and the offline skip is never honored - a
 // fetch failure is always a FAIL, even with CI unset and the skip
 // variable set. ACQ_PIN_URL_OVERRIDE exists only for the suite's own
-// local negative-network fixtures (point it at a dead local port).
+// local negative-network fixtures in default mode (point it at a dead
+// local port); strict mode refuses it with a FAIL.
 // Run: node test-pinned-cli-behavior.mjs [--strict]
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -78,9 +79,17 @@ if (!check("pinned download block is complete and unique",
 const pin = pins[0];
 const digest = digestMatch[1];
 const docLines = Number(linesMatch[1]);
-// ACQ_PIN_URL_OVERRIDE is a local-fixture hook (dead local port, etc.);
-// it is not a way to substitute another artifact - the digest/line-count
-// gate below still binds the bytes to the documented values.
+// ACQ_PIN_URL_OVERRIDE is a local-fixture hook (dead local port, etc.)
+// for the default mode only. In strict mode it is refused outright: the
+// release check must always verify the actual documented serving URL,
+// and a stray override in a release environment must fail loudly rather
+// than silently verify a substitute path.
+if (STRICT && process.env.ACQ_PIN_URL_OVERRIDE) {
+  check("no URL override in strict mode", false,
+    "ACQ_PIN_URL_OVERRIDE is set; the strict installer check always tests the actual documented serving URL - refusing to run against a substitute path");
+  console.error(`${failures} FAIL`);
+  process.exit(1);
+}
 const url = process.env.ACQ_PIN_URL_OVERRIDE || `https://raw.githubusercontent.com/damri-labs/acq/${pin}/cli/acq.js`;
 
 function fetchPinned() {
