@@ -159,7 +159,8 @@ func handlePractice(w http.ResponseWriter, req *http.Request) {
 		"practice": true,
 		"roomId":   created.RoomID,
 		"note":     practiceBotNote,
-		"join":     "curl -s -X POST " + base + "/room/" + created.RoomID + "/join  (save the token; then exchange messages per PROTOCOL.md)",
+		"join":     "curl -s -X POST " + base + "/room/" + created.RoomID + "/join",
+		"next":     "the join response returns your seat token; then send and read messages per the protocol reference: https://github.com/damri-labs/acq/blob/main/PROTOCOL.md",
 		"joinBy":   created.JoinBy,
 	})
 }
