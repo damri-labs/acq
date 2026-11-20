@@ -153,10 +153,11 @@
   </div>
   <div id="log"><div id="empty">listening...</div></div>
   <div id="invite" hidden>
-    <p>An ephemeral plain-text chat between two sides - two agents, or a person and an agent. To seat your agent, it runs one command:</p>
+    <p>A plain-text chat between two sides - two agents, or a person and an agent. To seat your agent, it runs one command:</p>
     <pre id="join-cmd"></pre>
     <p>The reply contains the seat token and the full API reference. <a href="/">What is ACQ?</a></p>
     <p>No agent at hand? Take the second seat yourself, from this browser:</p>
+    <p class="note">Before you type: messages you send here pass through this server and are stored on it as plain text so the other side can read them. They can remain stored until the room expires - and a room opened by a signed-in user may not expire at all. Cleanup after expiry is best-effort, not guaranteed.</p>
     <p><button id="join-human" type="button">Join as human guest</button><button id="join-check" type="button" hidden>Check room status</button><span id="join-human-err"></span></p>
     <p class="note">A guest join claims the second seat for this browser (the seat credential is stored here, in localStorage) and your messages are marked "human, self-declared" - a display label, not a verified identity. If this is your room and you want the live transcript here: save its acq1_ credential on the
     <a href="/">home page</a> (Saved rooms), or open it while signed in as its creator.</p>
@@ -393,6 +394,45 @@
       // after a confirmed send. Retrying is never automatic on this page.
       var draftCid = null;
       draft.addEventListener('input', function(){ draftCid = null; });
+      // Unsent-draft recovery for seat-credential sessions only (the
+      // guest/trial flow); the owner (H) path is excluded - no draft copy
+      // is written or read on that path. The copy lives in
+      // sessionStorage: scoped to this tab (a duplicated or opener-created
+      // tab inherits a copy), surviving refresh and browser crash-restore
+      // within the session, gone when the tab session ends. The key
+      // namespaces by room, seat, and a non-cryptographic digest of the
+      // seat token: namespacing to keep one credential's draft out of
+      // another credential's composer in this tab, not a security
+      // boundary, and no bearer characters are stored. A rotated
+      // (recovered) token digests differently, so recovery deliberately
+      // starts with an empty box. The draft's cid is stored with the
+      // text: a refresh between an unconfirmed send and its manual retry
+      // restores the same client id, so the retry goes out as the same
+      // message for the server's resubmission handling rather than as a
+      // fresh one. Cleared on a confirmed commit (the paths that clear
+      // the box); failure paths keep both.
+      function draftTokDigest(s){ var h = 5381; for (var i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; } return h.toString(16); }
+      var draftStoreKey = (!asOwner && c && c.seat && c.token)
+        ? 'acq_draft_' + uin + '_' + c.seat + '_' + draftTokDigest(c.token) : null;
+      function draftSave(){
+        if (!draftStoreKey) return;
+        try {
+          if (draft.value) sessionStorage.setItem(draftStoreKey, JSON.stringify({ t: draft.value, c: draftCid || null }));
+          else sessionStorage.removeItem(draftStoreKey);
+        } catch (e) {}
+      }
+      function draftSent(){ if (!draftStoreKey) return; try { sessionStorage.removeItem(draftStoreKey); } catch (e) {} }
+      if (draftStoreKey) {
+        try {
+          var savedDraft = JSON.parse(sessionStorage.getItem(draftStoreKey) || 'null');
+          if (savedDraft && savedDraft.t && !draft.value) {
+            draft.value = savedDraft.t;
+            draftCid = savedDraft.c || null;
+            draftOverCap();
+          }
+        } catch (e) {}
+      }
+      draft.addEventListener('input', draftSave);
       function post(){
         var text = draft.value;
         if (!text.trim() || postBtn.disabled || ended || gone) return;
@@ -403,6 +443,7 @@
         draft.disabled = true;
         sendErr.textContent = '';
         if (!draftCid) { draftCid = (crypto.randomUUID ? crypto.randomUUID() : 'w' + Date.now() + Math.random().toString(16).slice(2)); }
+        draftSave(); // bind THIS send's cid to the stored copy before flight
         fetch(base + '/room/' + encodeURIComponent(uin) + '/msg', {
           method: 'POST',
           headers: postHeaders,
@@ -412,6 +453,7 @@
             // Only now is the draft safe to drop.
             draft.value = '';
             draftCid = null;
+            draftSent();
             pollNow();
             return;
           }
@@ -434,6 +476,7 @@
             if (d && d.stored === 'unknown' && d.cid === draftCid && Number.isSafeInteger(d.seq) && d.seq >= 1) {
               draft.value = '';
               draftCid = null;
+              draftSent();
               sendErr.textContent = 'Delivered, but the server could not confirm durable storage.';
               pollNow();
               return;

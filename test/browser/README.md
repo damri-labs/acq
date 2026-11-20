@@ -159,6 +159,20 @@ touches before merging it.
   on both the uuid and fallback cid paths (the fallback path is exercised
   for real, with crypto.randomUUID removed). No proxy needed; BASE_URL
   enforced loopback-only.
+- `draft-restore.js` - unsent-draft recovery suite (room page, #draft):
+  the session-only, tab-scoped draft copy (sessionStorage, keyed by
+  room + seat + a non-cryptographic digest of the seat token for
+  namespacing, not security) saves on input, removes on empty, restores
+  after refresh, and clears on a confirmed send. Isolation assertions:
+  no cross-room, no cross-seat, none in a fresh tab; an opener-created
+  tab DOES inherit the copy (asserted as truthful sessionStorage
+  behavior). The bound cid survives refresh so a retry after an
+  unconfirmed send is the same client id (server-side resubmission
+  handling, exercised for real through the proxy's blackhole flag:
+  identical cid on both wire attempts, exactly one committed message).
+  A restored over-cap draft re-engages the cap gate immediately.
+  Needs the proxy for the blackhole test; direct BASE_URL used for the
+  rest; both enforced loopback-only.
 
 ## Setup
 

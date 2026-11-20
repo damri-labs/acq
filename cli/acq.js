@@ -76,6 +76,50 @@ function saveState(s) {
   writePrivate(FILE, JSON.stringify(s, null, 2));
 }
 
+// Exactly one session is stored, so a successful `new` or `join` REPLACES
+// the previous room's only local credential - while that room may still be
+// live, and every later command authenticates with the stored token only
+// (`--room` overrides the UIN, never the token). Switching rooms must be a
+// deliberate act: refuse BEFORE any network call whenever a stored session
+// would be replaced, unless the operator opted in with --replace. Refusal
+// creates and claims nothing remotely; reads/sends/status in the stored
+// room are never affected. There is NO same-room exemption: joining your
+// own owner room succeeds on the server (seat B is free) and would discard
+// the owner credential for a seat-B token, and true re-entry is /rejoin,
+// which this CLI has no command for - so every stored session is guarded,
+// and --replace covers the rare intentional discard. A session counts as
+// stored when it names a room and carries either a token or a credential
+// (tokenless saved state still holds the recovery secret).
+function guardSessionReplace(state, opts) {
+  if (!state || !isStr(state.room)) return;
+  if (!isStr(state.token) && !isStr(state.credential)) return;
+  const who = `room ${state.room} (seat ${state.seat || "?"})`;
+  if (opts.replace) {
+    console.error(`warning: replacing the stored session for ${who}. Its credential will be gone from this machine: if that room is still live you lose your place in it here; if it has ended, its transcript stays readable until the room expires, but you will no longer be able to read it from this machine. Its recovery secret, if any, is lost with it.`);
+    return;
+  }
+  console.error(`refusing to replace the stored session for ${who} - that room may still be live and its credential exists only on this machine. Nothing was created or claimed remotely. The stored room still works: acq recv / send / status. To discard that credential and switch anyway, re-run with --replace.`);
+  process.exit(1);
+}
+
+// Best-effort writability preflight for new/join: run the SAME write path
+// (ensureDir + temp file + rename) against the real state directory BEFORE
+// any remote create/join, so the common case - an unwritable ~/.config/acq -
+// fails before a room or seat is committed remotely. A passing probe is not
+// a guarantee: the real save can still fail (e.g. the disk fills between
+// probe and write, or the target path itself is blocked), and the post-commit
+// handlers below cover that residual. The probe uses its own filename, so it
+// never touches an existing session or cursor file, and it cleans up after
+// itself.
+function probeStorage() {
+  const probe = join(DIR, `.probe.${process.pid}`);
+  try {
+    writePrivate(probe, "");
+  } finally {
+    try { unlinkSync(probe); } catch { /* never written, or already gone */ }
+  }
+}
+
 // Replay-safe read cursors, one per room, in their own file. The session
 // file stays exclusively owned by `acq new` / `acq join`: a parked watch or
 // recv writes only cursors.json, and always keyed by the room it actually
@@ -178,6 +222,7 @@ function parseArgs(argv) {
       opts.wait = Number(raw.split(".")[0]);
     }
     else if (argv[i] === "--room") opts.room = argv[++i];
+    else if (argv[i] === "--replace") opts.replace = true;
     else if (argv[i].startsWith("--")) { console.error(`unknown flag ${argv[i]} - see acq help (use -- before text that starts with dashes)`); process.exit(1); }
     else args.push(argv[i]);
   }
@@ -272,11 +317,26 @@ const room = opts.room || state.room;
 
 switch (cmd) {
   case "new": {
+    guardSessionReplace(state, opts);
+    try { probeStorage(); }
+    catch (e) {
+      console.error(`cannot save a session locally (${e.code || e.message} at ${e.path || DIR}); refusing to create a room whose credential this machine could not keep. Fix the directory above and retry - no room was created.`);
+      process.exit(1);
+    }
     const r = await apiMut("POST", "/room", { validate: validCreate });
     if (r.kind === "ok" || r.kind === "committed") {
       const d = r.data;
-      saveState({ room: d.roomId, token: d.token, seat: "A", ...(isStr(d.credential) ? { credential: d.credential } : {}) });
-      seedCursor(d.roomId);
+      try {
+        saveState({ room: d.roomId, token: d.token, seat: "A", ...(isStr(d.credential) ? { credential: d.credential } : {}) });
+      } catch (e) {
+        // The room now exists remotely but its credential reached nowhere
+        // durable. The UIN is printed because the normal flow prints it
+        // anyway; the token/credential are bearer secrets and are not.
+        console.error(`room ${d.roomId} was created, but the session could not be saved locally (${e.code || e.message} at ${e.path || FILE}). The room's credential is not on this machine and is not printed, so this room cannot be operated from here; an unclaimed guest room expires on its own. Fix the storage problem above and create a fresh room.`);
+        process.exit(1);
+      }
+      try { seedCursor(d.roomId); }
+      catch (e) { console.error(`warning: session saved, but cursor storage failed (${e.code || e.message} at ${e.path || CURSORS}); replay-safety starts on the first successful recv.`); }
       // The join window is the server's to set: print what the response's
       // joinBy actually grants rather than a hardcoded number that can drift
       // from the real deadline (the server grants 2 hours unclaimed; this
@@ -300,14 +360,30 @@ switch (cmd) {
   case "join": {
     const uin = joinArgToUin(args[1]);
     if (!uin) { console.error("usage: acq join <uin-or-invite-link>"); process.exit(1); }
+    guardSessionReplace(state, opts);
+    try { probeStorage(); }
+    catch (e) {
+      console.error(`cannot save a session locally (${e.code || e.message} at ${e.path || DIR}); refusing to claim a seat whose credential this machine could not keep. Fix the directory above and retry - no join was attempted.`);
+      process.exit(1);
+    }
     const r = await apiMut("POST", `/room/${uin}/join`, { validate: d => validJoin(d, uin) });
     if (r.kind === "ok" || r.kind === "committed") {
       // An ambiguous (committed) answer can carry the seat token only
       // inside the credential - take it from there when the top level
       // has none, so the saved session is actually usable.
       const cred = decodeCred(r.data.credential);
-      saveState({ room: uin, token: isStr(r.data.token) ? r.data.token : (cred ? cred.token : undefined), seat: "B", ...(isStr(r.data.credential) ? { credential: r.data.credential } : {}) });
-      seedCursor(uin);
+      try {
+        saveState({ room: uin, token: isStr(r.data.token) ? r.data.token : (cred ? cred.token : undefined), seat: "B", ...(isStr(r.data.credential) ? { credential: r.data.credential } : {}) });
+      } catch (e) {
+        // The seat is claimed remotely but its credential (and recovery
+        // code) died here. Re-running join would 409 against this very
+        // seat; there is no local recovery - say so rather than inventing
+        // one. The token/credential are bearer secrets and are not printed.
+        console.error(`you joined room ${uin}, but the session could not be saved locally (${e.code || e.message} at ${e.path || FILE}). Your seat credential is not on this machine, is not printed, and cannot be reclaimed here - re-running acq join will fail with "room full" because this earlier join holds the seat. Tell the room's creator that this seat is unusable so they can create a fresh room.`);
+        process.exit(1);
+      }
+      try { seedCursor(uin); }
+      catch (e) { console.error(`warning: session saved, but cursor storage failed (${e.code || e.message} at ${e.path || CURSORS}); replay-safety starts on the first successful recv.`); }
       console.log(`Joined room ${uin}. ${fmtTime(r.data.expiresAt)}.`);
       if (r.kind === "committed") console.error(`warning: your seat was claimed but the server could not confirm durable storage (it answered ${r.status} with stored:"unknown"). Your token and recovery secret are saved locally; if the server loses its write across a restart, re-enter with the recovery code in the saved credential.`);
       break;
@@ -511,7 +587,7 @@ switch (cmd) {
     break;
   }
   default:
-    console.log(`acq — ephemeral two-seat rooms
+    console.log(`acq — two-seat rooms
 
   acq new                 create a room, print the UIN to share
   acq join <uin-or-link>  claim seat B (bare UIN or the invite link)
@@ -521,5 +597,5 @@ switch (cmd) {
   acq log                 transcript of peer messages
   acq status              peer joined? seq? time left?
 
-  --room <uin> overrides stored state. ACQ_SERVER overrides the server URL.`);
+  --room <uin> overrides stored state. --replace allows new/join to discard the stored session. ACQ_SERVER overrides the server URL.`);
 }
