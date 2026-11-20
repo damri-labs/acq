@@ -40,6 +40,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 	analyticsMu.Lock()
 	analytics = analyticsFile{Days: map[string]*analyticsDay{}}
 	analyticsMu.Unlock()
+	practiceMu.Lock()
+	practiceCreates = map[string]int{}
+	practiceWindow = time.Time{}
+	practiceActive = 0
+	practiceMu.Unlock()
 
 	t.Setenv("ANALYTICS_TOKEN", "test-token")
 
@@ -61,6 +66,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/stats", handleStats)
 	mux.HandleFunc("/analytics", handleAnalytics)
 	mux.HandleFunc("/feedback", handleFeedback)
+	if practicePeerEnabled() {
+		mux.HandleFunc("/practice", handlePractice)
+	}
 	mux.HandleFunc("/mcp", handleMCP)
 	mux.HandleFunc("/auth/login", handleAuthLogin)
 	mux.HandleFunc("/auth/callback", handleAuthCallback)
