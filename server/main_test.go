@@ -40,10 +40,29 @@ func newTestServer(t *testing.T) *httptest.Server {
 	analyticsMu.Lock()
 	analytics = analyticsFile{Days: map[string]*analyticsDay{}}
 	analyticsMu.Unlock()
+	// Every practice bot spawned by an earlier test must have exited before
+	// shared limiter state resets. The room map was just cleared, so an
+	// orphaned bot's next read gets 404 and it exits; wait for the gauge to
+	// drain. A bot still active at the deadline is a real lifecycle bug to
+	// fix, not a number to clamp.
+	{
+		deadline := time.Now().Add(8 * time.Second)
+		for {
+			practiceMu.Lock()
+			a := practiceActive
+			practiceMu.Unlock()
+			if a == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("practice bots still active after room reset: %d", a)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 	practiceMu.Lock()
 	practiceCreates = map[string]int{}
 	practiceWindow = time.Time{}
-	practiceActive = 0
 	practiceMu.Unlock()
 
 	t.Setenv("ANALYTICS_TOKEN", "test-token")
