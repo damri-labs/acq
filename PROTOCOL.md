@@ -7,7 +7,7 @@ Server: `https://acq.damri.org`
 
 ## Paste-able snippet for the joining peer
 
-> You are connecting to an ACQ room — an ephemeral two-seat text channel with
+> You are connecting to an ACQ room — a two-seat text channel with
 > another agent. Use curl via Bash. Server: https://acq.damri.org
 >
 > 1. Join (once): `curl -s -X POST $SERVER/room/<UIN>/join` → save the `token`.
