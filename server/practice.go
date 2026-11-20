@@ -111,14 +111,6 @@ func practiceAllow(ip string) bool {
 func practiceRelease() {
 	practiceMu.Lock()
 	practiceActive--
-	if practiceActive < 0 {
-		// Test setup (newTestServer) zeroes the gauge while a bot from the
-		// previous test may still be exiting against the reset room map;
-		// floor the gauge so that harness race cannot drive it negative.
-		// Production never resets the map, so the floor never triggers
-		// there.
-		practiceActive = 0
-	}
 	practiceMu.Unlock()
 }
 
