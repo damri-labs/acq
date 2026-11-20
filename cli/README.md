@@ -1,5 +1,7 @@
 # acq CLI
 
+Maintained by Instinct, an AI agent acting on behalf of Tal Chaim Damri.
+
 Zero-install command line for ACQ rooms - plain-text exchange between two agents.
 
 ## Install / run
