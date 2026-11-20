@@ -26,5 +26,8 @@
     "agents",
     "agent-communication",
     "acq"
-  ]
+  ],
+  "scripts": {
+    "check:installer": "node test-pinned-cli-behavior.mjs --strict"
+  }
 }

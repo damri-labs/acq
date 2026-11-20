@@ -22,7 +22,16 @@
 // skip for offline development only: under CI (the CI variable is set)
 // the skip is ignored and a fetch failure stays a FAIL, so a skipped
 // run can never count as CI success.
-// Run: node test-pinned-cli-behavior.mjs
+//
+// --strict (wired as `npm run check:installer`): the documented-installer
+// release check. Differences from the default mode: a README without a
+// pinned-download block is a FAIL (the installer documentation must not
+// silently lose its pin), and the offline skip is never honored - a
+// fetch failure is always a FAIL, even with CI unset and the skip
+// variable set. ACQ_PIN_URL_OVERRIDE exists only for the suite's own
+// local negative-network fixtures in default mode (point it at a dead
+// local port); strict mode refuses it with a FAIL.
+// Run: node test-pinned-cli-behavior.mjs [--strict]
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -31,6 +40,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const STRICT = process.argv.includes("--strict");
 const DIR = fileURLToPath(new URL(".", import.meta.url));
 const readme = readFileSync(join(DIR, "README.md"), "utf8");
 
@@ -50,6 +60,12 @@ const digestMatch = readme.match(/should print\s*exactly\s*`([0-9a-fA-F]+)`/s);
 const linesMatch = readme.match(/self-contained file - (\d+) lines/);
 
 if (!pins.length && !digestMatch && !linesMatch) {
+  if (STRICT) {
+    check("pinned download documented in cli/README.md", false,
+      "strict mode requires the documented installer pin; a README without it must not pass the release check");
+    console.error(`${failures} FAIL`);
+    process.exit(1);
+  }
   console.log("ok - no pinned download documented in cli/README.md; nothing to check");
   process.exit(0);
 }
@@ -63,7 +79,18 @@ if (!check("pinned download block is complete and unique",
 const pin = pins[0];
 const digest = digestMatch[1];
 const docLines = Number(linesMatch[1]);
-const url = `https://raw.githubusercontent.com/damri-labs/acq/${pin}/cli/acq.js`;
+// ACQ_PIN_URL_OVERRIDE is a local-fixture hook (dead local port, etc.)
+// for the default mode only. In strict mode it is refused outright: the
+// release check must always verify the actual documented serving URL,
+// and a stray override in a release environment must fail loudly rather
+// than silently verify a substitute path.
+if (STRICT && process.env.ACQ_PIN_URL_OVERRIDE) {
+  check("no URL override in strict mode", false,
+    "ACQ_PIN_URL_OVERRIDE is set; the strict installer check always tests the actual documented serving URL - refusing to run against a substitute path");
+  console.error(`${failures} FAIL`);
+  process.exit(1);
+}
+const url = process.env.ACQ_PIN_URL_OVERRIDE || `https://raw.githubusercontent.com/damri-labs/acq/${pin}/cli/acq.js`;
 
 function fetchPinned() {
   return new Promise((resolve, reject) => {
@@ -86,12 +113,14 @@ let bytes;
 try {
   bytes = await fetchPinned();
 } catch (err) {
-  if (process.env.ACQ_PIN_BEHAVIOR_OFFLINE_SKIP === "1" && !process.env.CI) {
+  if (!STRICT && process.env.ACQ_PIN_BEHAVIOR_OFFLINE_SKIP === "1" && !process.env.CI) {
     console.log(`skip - pinned CLI could not be fetched (${err.message}); downloaded behavior NOT verified (explicit offline skip)`);
     process.exit(0);
   }
   check("pinned CLI fetched for behavioral verification", false,
-    `${err.message} - downloaded behavior unverified; fail-closed. Set ACQ_PIN_BEHAVIOR_OFFLINE_SKIP=1 for an explicit offline skip`);
+    STRICT
+      ? `${err.message} - downloaded behavior unverified; strict mode never skips`
+      : `${err.message} - downloaded behavior unverified; fail-closed. Set ACQ_PIN_BEHAVIOR_OFFLINE_SKIP=1 for an explicit offline skip`);
   console.error(`${failures} FAIL`);
   process.exit(1);
 }
