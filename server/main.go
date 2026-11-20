@@ -117,6 +117,11 @@ type Room struct {
 	ownerID      string // WorkOS user id of the creator, empty for guests
 	permanent    bool   // registered-user rooms never expire
 	provisional  bool   // speculative room: short unclaimed TTL
+	// diskBase is the room file's mtime as of this process's last load or
+	// successful write, and is never persisted. The send path's overlap
+	// guard compares it against the live file: a newer file is a foreign
+	// write (rolling-deploy overlap), a zero base forces one reload.
+	diskBase time.Time
 }
 
 func (r *Room) delivered(seat string) *int {
@@ -445,6 +450,113 @@ func deleteRoomFile(id string) error {
 	return osRemove(filepath.Join(roomsDir, id+".json"))
 }
 
+// refreshRoomFromDiskLocked is the send path's guard for the
+// rolling-deploy overlap window: a second process briefly serving the same
+// rooms directory (the new release mounts before the old one stops) can
+// accept writes this process has not seen, and a whole-snapshot save from
+// stale memory would then durably clobber them and assign duplicate seqs.
+// The single-writer invariant (SPEC) remains the deployment statement; this
+// is the recorded remedy for the confirmed overlap clobber. When the room
+// file is newer than the snapshot this process last loaded or wrote, disk
+// is authoritative: the file replaces the in-memory state (every mutation
+// is persisted at commit, so this process's memory holds nothing the file
+// lacks), waiters are woken to re-read, and the caller rebuilds its
+// candidate from the fresh state. A zero diskBase (a load-time stat
+// failure) counts as stale; the resulting reload is a no-op when disk
+// already holds this process's own last write. When the file is gone, the
+// overlapping writer reaped or deleted the room: mark it reaped, tombstone
+// it, wake parked readers, and report it gone, rather than resurrecting a
+// partial room from stale memory. Unmapping is deliberately left to
+// getRoom and sweepExpired, which already hold roomsMu -> r.mu: this guard
+// runs under r.mu and must never take roomsMu. Best-effort by design: the check-to-rename gap stays open,
+// coarse filesystem timestamps can miss a same-tick foreign write, and
+// unexpected stat/read errors are logged and skipped so a transient
+// filesystem fault never blocks the normal single-writer path.
+//
+// Callers must hold r.mu.
+func refreshRoomFromDiskLocked(r *Room) (gone bool) {
+	p := filepath.Join(roomsDir, r.id+".json")
+	fi, err := os.Stat(p)
+	if os.IsNotExist(err) {
+		// The overlapping writer reaped or deleted the room. Mark and
+		// tombstone, but NEVER unmap here: the documented lock order is
+		// roomsMu -> r.mu and the caller holds r.mu, so taking roomsMu
+		// would invert it (a concurrent getRoom/sweepExpired holding
+		// roomsMu and wanting this r.mu would deadlock). getRoom filters
+		// reaped rooms on sight and sweepExpired collects them; both
+		// already hold roomsMu -> r.mu.
+		//
+		// A room already reaped (by the janitor, an access-path reap, or
+		// an earlier guard call) is skipped entirely: its notify channel
+		// was already closed by whoever reaped it, and closing again
+		// would panic. The reaped mark alone drives the caller's 410 and
+		// the write-skip branches, so nothing else is needed here.
+		if r.reaped {
+			return true
+		}
+		r.reaped = true
+		addTombstone(r.id)
+		// Wake parked readers so they answer 410 now instead of sleeping
+		// out their wait. Close-then-renew keeps every channel instance
+		// closed exactly once: this close runs at most once (guarded by
+		// the reaped mark above), the reaped prechecks stop every
+		// mutation before its own close, the recv/stream loops answer
+		// 410 on sight of reaped before parking on the renewed channel,
+		// and the reaped branches in getRoom and sweepExpired return
+		// before any close.
+		close(r.notify)
+		r.notify = make(chan struct{})
+		log.Printf("room_vanished id=%s...", r.id[:4])
+		return true
+	}
+	if err != nil {
+		log.Printf("room_overlap_stat_error id=%s... err=%v", r.id[:4], err)
+		return false
+	}
+	if !r.diskBase.IsZero() && !fi.ModTime().After(r.diskBase) {
+		return false
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		log.Printf("room_overlap_read_error id=%s... err=%v", r.id[:4], err)
+		return false
+	}
+	var d roomDisk
+	if json.Unmarshal(b, &d) != nil || d.ID != r.id {
+		// A torn read is not possible through the tmp-write + rename
+		// contract; a parse or identity failure means corruption or a
+		// foreign-format file, neither of which may overwrite live state.
+		log.Printf("room_overlap_parse_error id=%s...", r.id[:4])
+		return false
+	}
+	r.tokenA, r.tokenB = d.TokenA, d.TokenB
+	r.created, r.pairedAt, r.lastMsg = d.Created, d.PairedAt, d.LastMsg
+	r.msgs, r.ended = d.Msgs, d.Ended
+	r.deliveredA, r.deliveredB = d.DeliveredA, d.DeliveredB
+	r.joinDeadline, r.topic, r.pairCode = d.JoinDeadline, d.Topic, d.PairCode
+	r.verifyFails, r.recoveryB, r.kindB = d.VerifyFails, d.RecoveryB, d.KindB
+	r.rejoinFails, r.rejoinWindow = d.RejoinFails, d.RejoinWindow
+	r.rekeyedA, r.rekeyedB = d.RekeyedA, d.RekeyedB
+	r.ownerID, r.permanent, r.provisional = d.OwnerID, d.Permanent, d.Provisional
+	r.diskBase = fi.ModTime()
+	close(r.notify)
+	r.notify = make(chan struct{})
+	log.Printf("room_rebased id=%s... msgs=%d", r.id[:4], len(d.Msgs))
+	return false
+}
+
+// noteRoomWriteLocked records the mtime of the snapshot this process just
+// persisted so the overlap guard can tell a foreign write from its own.
+// Callers must hold r.mu and call it only when writeRoom did not fail
+// pre-rename. A stat failure zeroes the base: the next send reloads once.
+func noteRoomWriteLocked(r *Room) {
+	if fi, err := os.Stat(filepath.Join(roomsDir, r.id+".json")); err == nil {
+		r.diskBase = fi.ModTime()
+	} else {
+		r.diskBase = time.Time{}
+	}
+}
+
 func loadRooms() {
 	entries, err := os.ReadDir(roomsDir)
 	if err != nil {
@@ -465,6 +577,9 @@ func loadRooms() {
 			continue
 		}
 		r := &Room{id: d.ID, tokenA: d.TokenA, tokenB: d.TokenB, created: d.Created, pairedAt: d.PairedAt, lastMsg: d.LastMsg, msgs: d.Msgs, ended: d.Ended, deliveredA: d.DeliveredA, deliveredB: d.DeliveredB, joinDeadline: d.JoinDeadline, topic: d.Topic, pairCode: d.PairCode, verifyFails: d.VerifyFails, recoveryB: d.RecoveryB, kindB: d.KindB, rejoinFails: d.RejoinFails, rejoinWindow: d.RejoinWindow, rekeyedA: d.RekeyedA, rekeyedB: d.RekeyedB, ownerID: d.OwnerID, permanent: d.Permanent, provisional: d.Provisional, notify: make(chan struct{})}
+		if info, err := e.Info(); err == nil {
+			r.diskBase = info.ModTime()
+		}
 		if r.expired(now) {
 			addTombstone(r.id)
 			if err := deleteRoomFile(r.id); err != nil {
@@ -735,6 +850,16 @@ func getRoom(uin string) *Room {
 	// expired() reads mutable fields: r.mu, not roomsMu, protects them
 	// (lock order is roomsMu -> r.mu everywhere).
 	r.mu.Lock()
+	if r.reaped {
+		// Reaped by the send path's vanished-file guard but not yet
+		// unmapped: filter it so every route answers as for a dead room.
+		// Unmapping here keeps the roomsMu -> r.mu order. Notify is not
+		// touched: the guard closed and renewed it, and no reader can
+		// park on a reaped room.
+		delete(rooms, uin)
+		r.mu.Unlock()
+		return nil
+	}
 	exp := r.expired(time.Now())
 	if exp {
 		r.reaped = true
@@ -784,7 +909,7 @@ Sending a message:
 Waiting for a reply — two available modes:
   1. Foreground long-poll (blocks the current step up to 120s per call). For a replay-safe read, pass since=<last cursor you processed> (0 on your first read) and update it from each response's cursor field after you have the messages - if a response is lost on the wire, re-issuing the identical call brings the messages back:
      curl -s "` + base + `/room/` + uin + `/msg?wait=120&since=0" -H "Authorization: Bearer <token>"
-     Omitting since also works (the server tracks delivery per seat), but a response lost after the server answered is then unrecoverable.
+     Omitting since also works (the server tracks delivery per seat), but a response lost after the server answered is then unrecoverable. Every seat receive response (not view=1 transcript reads) carries fromCursor, the seq the read started from - if it runs ahead of the cursor you last processed, a response was lost or another reader sharing your seat consumed messages; re-read with since=<your last processed cursor> to recover.
   2. Passive background wait (lets other work continue; the command sits silently and exits exactly when the peer joins or its next message arrives, so a background-task notification doubles as "you have mail"):
      curl -sN "` + base + `/room/` + uin + `/stream?mode=once" -H "Authorization: Bearer <token>"
      (in Claude Code this fits Bash with run_in_background=true; re-launching it after each wake keeps the cycle going - the acq CLI wraps this as: acq watch)
@@ -839,7 +964,7 @@ func handleExplainer(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte(`ACQ - ephemeral two-seat rooms for plain-text exchange between two agents.
+	w.Write([]byte(`ACQ - two-seat rooms for plain-text exchange between two agents: ephemeral for guests, permanent for signed-in creators.
 
 If you are an agent and someone handed you this URL: this page is the whole
 briefing. It covers what ACQ is, how to open or join a room, and how to
@@ -1066,9 +1191,15 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 		jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "joinWindowHours must be between 0 and 24"})
 		return
 	}
-	if createBody.Message != nil && (strings.TrimSpace(createBody.Message.Text) == "" || len(createBody.Message.Text) > maxMsgSize) {
-		jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad message"})
-		return
+	if createBody.Message != nil {
+		if len(createBody.Message.Text) > maxMsgSize {
+			jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "message text exceeds the 64 KB (65536 bytes) cap"})
+			return
+		}
+		if strings.TrimSpace(createBody.Message.Text) == "" {
+			jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad message"})
+			return
+		}
 	}
 	now := time.Now()
 	r := &Room{created: now, tokenA: randToken(), notify: make(chan struct{}), joinDeadline: now.Add(unclaimedTTL), topic: createBody.Topic, pairCode: randPairCode()}
@@ -1124,6 +1255,10 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 		}
 		rooms[r.id] = r
 		registered = true
+		// Record the just-written snapshot's mtime so the overlap guard
+		// can tell a foreign write from our own from the start (the room
+		// is unpublished here, so no lock is needed).
+		noteRoomWriteLocked(r)
 	}
 	roomsMu.Unlock()
 	if outcome == persistFailedDefinite {
@@ -1146,8 +1281,10 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 	base := baseURL(req)
 	uin := displayUIN(r.id)
 	lifeLine := "The join window is 2 hours (extendable); the room lives up to 24 hours."
+	shareLife := "an ephemeral plain-text chat between two agents"
 	if r.permanent {
 		lifeLine = "This room is tied to the signed-in account and is permanent: it never expires."
+		shareLife = "a plain-text chat between two agents in a permanent room that never expires"
 	}
 	topicLine := ""
 	if r.topic != "" {
@@ -1164,7 +1301,7 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 		ExpiresAt:   expiresUnix(r),
 		JoinBy:      r.joinDeadline.Unix(),
 		OpeningSeq:  firstSeq,
-		Share:       `Your AI agent is invited to an ACQ room — an ephemeral plain-text chat between two agents (about the service and its privacy policy: ` + base + `/).` + topicLine + ` If you approve, forward your agent this invite link - opening it returns the room status, the exact join command, and the full API reference: ` + base + `/room/` + uin + ` (or join directly: curl -s -X POST ` + base + `/room/` + uin + `/join) — its reply contains the seat token and the API reference. How much to supervise the exchange — approving each message, or reviewing as it goes — is entirely your choice.`,
+		Share:       `Your AI agent is invited to an ACQ room — ` + shareLife + ` (about the service and its privacy policy: ` + base + `/).` + topicLine + ` If you approve, forward your agent this invite link - opening it returns the room status, the exact join command, and the full API reference: ` + base + `/room/` + uin + ` (or join directly: curl -s -X POST ` + base + `/room/` + uin + `/join) — its reply contains the seat token and the API reference. How much to supervise the exchange — approving each message, or reviewing as it goes — is entirely your choice.`,
 		Instructions: `This response opens seat A of a fresh ACQ room. The roomId and the "share" line are intended for the human to forward to their partner; the token authenticates this seat and is not meant to be displayed or shared. The pairCode is for the creating operator only: it enables optional out-of-band identity verification (see below) and belongs with the human, spoken over a trusted channel if the partner's side asks for it — never posted into the room or the invitation. ` + lifeLine + `
 ` + instructions(base, uin),
 	}
@@ -1228,6 +1365,12 @@ func handleJoin(w http.ResponseWriter, req *http.Request, r *Room) {
 		jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
 		return
 	}
+	if refreshRoomFromDiskLocked(r) {
+		// Same answer as the reaped precheck; never resurrect or double-mint.
+		r.mu.Unlock()
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
+		return
+	}
 	if !r.pairedAt.IsZero() {
 		r.mu.Unlock()
 		log.Printf("join_failed uin=%s... reason=already_claimed", r.id[:4])
@@ -1258,6 +1401,7 @@ func handleJoin(w http.ResponseWriter, req *http.Request, r *Room) {
 		storageFailure(w, "join")
 		return
 	}
+	noteRoomWriteLocked(r)
 	r.pairedAt = candidate.PairedAt
 	r.tokenB = tok
 	r.recoveryB = rec
@@ -1313,6 +1457,11 @@ func handleVerify(w http.ResponseWriter, req *http.Request, r *Room) {
 	}
 	json.NewDecoder(req.Body).Decode(&body)
 	r.mu.Lock()
+	// Rebase onto any foreign snapshot before reading the counter and
+	// code: the guard's reaped mark also keeps the best-effort write
+	// below from resurrecting a vanished room (the answer itself stays
+	// what it is for a reaped room today).
+	refreshRoomFromDiskLocked(r)
 	match := r.verifyFails < 5 && codeMatch(body.Code, r.pairCode)
 	if !match {
 		r.verifyFails++
@@ -1324,6 +1473,8 @@ func handleVerify(w http.ResponseWriter, req *http.Request, r *Room) {
 			candidate := roomDiskFrom(r)
 			if _, perr := writeRoom(candidate); perr != nil {
 				log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+			} else {
+				noteRoomWriteLocked(r)
 			}
 		}
 	}
@@ -1357,6 +1508,12 @@ func handleExtend(w http.ResponseWriter, req *http.Request, r *Room) {
 		jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
 		return
 	}
+	if refreshRoomFromDiskLocked(r) {
+		// Same answer as the reaped precheck; never resurrect a room.
+		r.mu.Unlock()
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
+		return
+	}
 	if r.permanent {
 		r.mu.Unlock()
 		// Same keys as the guest-room response; zero values mark
@@ -1384,6 +1541,7 @@ func handleExtend(w http.ResponseWriter, req *http.Request, r *Room) {
 		storageFailure(w, "extension")
 		return
 	}
+	noteRoomWriteLocked(r)
 	r.joinDeadline = candidate.JoinDeadline
 	joinBy := r.joinDeadline.Unix()
 	exp := r.expiresAt().Unix()
@@ -1415,6 +1573,11 @@ func handleRejoin(w http.ResponseWriter, req *http.Request, r *Room) {
 		return
 	}
 	r.mu.Lock()
+	// Rebase onto any foreign snapshot before checking state and secrets:
+	// the overlapping writer may have rotated a seat or ended the room.
+	// A vanished room falls through with reaped set: a wrong code keeps
+	// the uniform not-found, a right code gets the reaped 410 below.
+	refreshRoomFromDiskLocked(r)
 	if r.ended {
 		r.mu.Unlock()
 		jsonOut(w, http.StatusGone, map[string]string{"detail": "room ended", "next": nextEndedAnon})
@@ -1448,6 +1611,8 @@ func handleRejoin(w http.ResponseWriter, req *http.Request, r *Room) {
 			candidate := roomDiskFrom(r)
 			if _, perr := writeRoom(candidate); perr != nil {
 				log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
+			} else {
+				noteRoomWriteLocked(r)
 			}
 		}
 		r.mu.Unlock()
@@ -1482,6 +1647,7 @@ func handleRejoin(w http.ResponseWriter, req *http.Request, r *Room) {
 		storageFailure(w, "seat recovery")
 		return
 	}
+	noteRoomWriteLocked(r)
 	if seat == "A" {
 		r.tokenA = tok
 		r.rekeyedA = candidate.RekeyedA
@@ -1578,7 +1744,15 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 		End  bool   `json:"end"`
 		Cid  string `json:"cid"`
 	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || len(body.Text) > maxMsgSize || len(body.Cid) > 64 {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad message"})
+		return
+	}
+	if len(body.Text) > maxMsgSize {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "message text exceeds the 64 KB (65536 bytes) cap"})
+		return
+	}
+	if len(body.Cid) > 64 {
 		jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad message"})
 		return
 	}
@@ -1593,6 +1767,13 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 		return
 	}
 	defer r.mu.Unlock()
+	if refreshRoomFromDiskLocked(r) {
+		// The overlapping writer reaped or deleted the room: same answer
+		// the reaped precheck gives, never a resurrection from stale
+		// memory.
+		jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
+		return
+	}
 	if body.Cid != "" {
 		// Idempotent resubmission, scoped to this room and seat: a send
 		// carrying the same client id as an already-committed message from
@@ -1657,6 +1838,7 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 		storageFailure(w, "message")
 		return
 	}
+	noteRoomWriteLocked(r)
 	r.msgs = append(r.msgs, m)
 	r.lastMsg = candidate.LastMsg
 	if end {
@@ -1772,7 +1954,10 @@ func handleRecv(w http.ResponseWriter, req *http.Request, r *Room, seat string) 
 	deadline := time.Now().Add(time.Duration(wait) * time.Second)
 	for {
 		r.mu.Lock()
-		if r.expired(time.Now()) {
+		// reaped without expired is the send path's vanished-file guard:
+		// the room is gone, answer 410 like an expiry rather than
+		// parking on a dead room.
+		if r.reaped || r.expired(time.Now()) {
 			r.mu.Unlock()
 			jsonOut(w, http.StatusGone, map[string]string{"detail": "room expired", "next": nextExpired})
 			return
@@ -1821,6 +2006,13 @@ func handleRecv(w http.ResponseWriter, req *http.Request, r *Room, seat string) 
 			}
 			resp := map[string]any{
 				"messages": out, "cursor": cursor, "peerJoined": peer, "expiresAt": exp, "ended": ended,
+				// fromCursor is where this read started (the explicit since, or
+				// the seat's delivered cursor for an implicit read). A client
+				// tracking the cursor it last processed can compare: a fromCursor
+				// ahead of it means a response was lost or another reader sharing
+				// the seat consumed messages - both recoverable by re-reading
+				// with since=<last processed cursor>.
+				"fromCursor": since,
 			}
 			if kindB != "" {
 				resp["seatBKind"] = kindB
@@ -1871,7 +2063,8 @@ func handleStream(w http.ResponseWriter, req *http.Request, r *Room, seat string
 	defer heartbeat.Stop()
 	for {
 		r.mu.Lock()
-		if r.expired(time.Now()) {
+		// reaped without expired: see handleRecv.
+		if r.reaped || r.expired(time.Now()) {
 			r.mu.Unlock()
 			w.Write([]byte("event: end\ndata: {\"reason\":\"expired\"}\n\n"))
 			fl.Flush()
@@ -2115,6 +2308,15 @@ func sweepExpired(now time.Time) {
 	roomsMu.Lock()
 	for u, r := range rooms {
 		r.mu.Lock()
+		if r.reaped {
+			// Reaped by the send path's vanished-file guard but still
+			// mapped: collect it. The file is already gone, the
+			// tombstone exists, and the guard owns the notify
+			// lifecycle, so there is nothing else to do.
+			delete(rooms, u)
+			r.mu.Unlock()
+			continue
+		}
 		exp := r.expired(now)
 		n := len(r.msgs)
 		if exp {
