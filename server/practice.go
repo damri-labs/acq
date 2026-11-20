@@ -29,6 +29,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -110,7 +111,38 @@ func practiceAllow(ip string) bool {
 func practiceRelease() {
 	practiceMu.Lock()
 	practiceActive--
+	if practiceActive < 0 {
+		// Test setup (newTestServer) zeroes the gauge while a bot from the
+		// previous test may still be exiting against the reset room map;
+		// floor the gauge so that harness race cannot drive it negative.
+		// Production never resets the map, so the floor never triggers
+		// there.
+		practiceActive = 0
+	}
 	practiceMu.Unlock()
+}
+
+// practiceJoinCommand builds the visitor-facing join instruction from an
+// origin validated here, locally to this handler: a pinned canonical
+// ACQ_PUBLIC_BASE_URL is already boot-validated, while a header-derived
+// origin must parse as a plain http(s) URL whose authority is only
+// unreserved host characters. Anything else - a poisoned X-Forwarded-Proto
+// or a Host carrying shell metacharacters - yields no command at all,
+// never a quoted-down attack string.
+func practiceJoinCommand(req *http.Request, uin string) (string, bool) {
+	u, err := url.Parse(baseURL(req))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" || u.RawQuery != "" {
+		return "", false
+	}
+	for _, r := range u.Host {
+		if 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || r == '.' || r == '-' || r == ':' || r == '[' || r == ']' {
+			continue
+		}
+		return "", false
+	}
+	// Whole-argument single quotes: the validated alphabet has no single
+	// quote, so the command stays exactly one safe shell word.
+	return "curl -s -X POST '" + u.Scheme + "://" + u.Host + "/room/" + uin + "/join'", true
 }
 
 // handlePractice serves POST /practice: mint a room whose seat A is the
@@ -154,15 +186,19 @@ func handlePractice(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	go practiceBot(created.RoomID, created.Token, ip)
-	base := baseURL(req)
-	jsonOut(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"practice": true,
 		"roomId":   created.RoomID,
 		"note":     practiceBotNote,
-		"join":     "curl -s -X POST " + base + "/room/" + created.RoomID + "/join",
-		"next":     "the join response returns your seat token; then send and read messages per the protocol reference: https://github.com/damri-labs/acq/blob/main/PROTOCOL.md",
 		"joinBy":   created.JoinBy,
-	})
+	}
+	if cmd, ok := practiceJoinCommand(req, created.RoomID); ok {
+		resp["join"] = cmd
+		resp["next"] = "the join response returns your seat token; then send and read messages per the protocol reference: https://github.com/damri-labs/acq/blob/main/PROTOCOL.md"
+	} else {
+		resp["next"] = "join with one POST to /room/" + created.RoomID + "/join on this server (no copyable command shown: the request's headers did not form a plain http(s) origin); the join response returns your seat token; then send and read messages per the protocol reference: https://github.com/damri-labs/acq/blob/main/PROTOCOL.md"
+	}
+	jsonOut(w, http.StatusOK, resp)
 }
 
 // practiceBot is the demo seat's loop: read with an explicit since cursor,
