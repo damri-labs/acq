@@ -65,6 +65,40 @@ func readUntil(t *testing.T, base, uin, token string, timeout time.Duration, pre
 func itoa(i int) string { return strconv.Itoa(i) }
 
 // With the env gate unset, no /practice route exists at all.
+// practiceEndRoom joins the room as the visitor and ends it, so the test
+// leaves no lingering bot goroutine behind.
+func practiceEndRoom(t *testing.T, base, uin string) {
+	t.Helper()
+	code, j := joinAsGuest(t, base, uin, []byte(`{}`))
+	if code != http.StatusOK {
+		t.Fatalf("end-room join: got %d", code)
+	}
+	tok, _ := j["token"].(string)
+	postJSON(t, "POST", base+"/room/"+uin+"/msg", tok, `{"text":"done","end":true}`)
+}
+
+func practiceCreateWithHeaders(t *testing.T, base, host, xfp string) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+"/practice", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if host != "" {
+		req.Host = host
+	}
+	if xfp != "" {
+		req.Header.Set("X-Forwarded-Proto", xfp)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("practice create: %v", err)
+	}
+	defer res.Body.Close()
+	var resp map[string]any
+	json.NewDecoder(res.Body).Decode(&resp)
+	return res.StatusCode, resp
+}
+
 func TestPracticeRouteAbsentWhenDisabled(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()
@@ -91,6 +125,7 @@ func TestPracticeCreateShape(t *testing.T) {
 			t.Fatalf("practice create leaks %s: %+v", secret, resp)
 		}
 	}
+	practiceEndRoom(t, srv.URL, resp["roomId"].(string))
 }
 
 // Full loop: join, banner, five scripted replies, room ends. The bot's
@@ -224,4 +259,56 @@ func TestPracticeBootPreservesOrdinaryMatchingTopic(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("ordinary matching-topic room harmed across boot: send got %d, want 200", code)
 	}
+}
+
+// The copyable join command is built only from a validated plain http(s)
+// origin: hostile forwarded headers produce no command (and no attack
+// text), while a pinned canonical base ignores them entirely.
+func TestPracticeJoinCommandOriginSafety(t *testing.T) {
+	t.Setenv("ACQ_PRACTICE_PEER", "1")
+	t.Setenv("ACQ_PUBLIC_BASE_URL", "")
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// Normal local request: usable clean command, whole-argument quoted.
+	code, resp := practiceCreate(t, srv.URL)
+	if code != http.StatusOK {
+		t.Fatalf("create: got %d", code)
+	}
+	practiceEndRoom(t, srv.URL, resp["roomId"].(string))
+	join, _ := resp["join"].(string)
+	if !strings.HasPrefix(join, "curl -s -X POST '") || !strings.HasSuffix(join, "/join'") {
+		t.Fatalf("normal join command malformed: %q", join)
+	}
+
+	// Hostile Host metacharacters: no join command, path-only next steps.
+	code, resp = practiceCreateWithHeaders(t, srv.URL, "evil;id;#", "")
+	if code != http.StatusOK {
+		t.Fatalf("create with hostile host: got %d", code)
+	}
+	if _, present := resp["join"]; present {
+		t.Fatalf("hostile host produced a join command: %v", resp["join"])
+	}
+	next, _ := resp["next"].(string)
+	if !strings.Contains(next, "POST to /room/") || strings.Contains(next, ";id;") {
+		t.Fatalf("fallback next-steps wrong or leaking attack text: %q", next)
+	}
+	practiceEndRoom(t, srv.URL, resp["roomId"].(string))
+}
+
+// A pinned canonical base makes the command immune to hostile headers.
+func TestPracticeJoinCommandPinnedBaseIgnoresHeaders(t *testing.T) {
+	t.Setenv("ACQ_PRACTICE_PEER", "1")
+	t.Setenv("ACQ_PUBLIC_BASE_URL", "https://acq.example.com")
+	srv := newTestServer(t)
+	defer srv.Close()
+	code, resp := practiceCreateWithHeaders(t, srv.URL, "ignored;id;", "http;id;")
+	if code != http.StatusOK {
+		t.Fatalf("create: got %d", code)
+	}
+	join, _ := resp["join"].(string)
+	if !strings.Contains(join, "'https://acq.example.com/room/") || strings.Contains(join, ";id;") {
+		t.Fatalf("pinned base not used or attack text present: %q", join)
+	}
+	practiceEndRoom(t, srv.URL, resp["roomId"].(string))
 }
