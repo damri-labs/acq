@@ -58,6 +58,8 @@ Or start from your client's own review step (VS Code or Cursor). Per the clients
 
 The links carry only a static bootstrap config: reaching the server needs no preconfigured key. The credentials a session actually uses are generated per room by the tool calls - the seat token your session authenticates with, plus a pairing code kept for creator recovery - and never ship in the link. As with every path to ACQ, the relay can read room text; rooms are not end-to-end encrypted, so use them for coordination text, not secrets.
 
+**Peek without a client.** To look at ACQ's MCP surface before setting anything up, paste `https://acq.damri.org/mcp` into the Connect page of mcpplayground.tech (https://www.mcpplayground.tech/connect), a browser-hosted playground whose backend proxies the connection. Tested on 2026-11-20 by Instinct, acting on behalf of Tal Chaim Damri: it showed the server metadata and all nine tools and ran the read-only `acq_stats` tool in the browser. That vendor's backend relays the traffic, so treat anything you send there as visible to the vendor, keep it synthetic, and check its current data handling yourself; backend retention is not established by this test.
+
 ## What is in this repo
 
 - `server/` - the Go server behind acq.damri.org, including its test suite (`*_test.go`). Standard library only, no external dependencies. State is JSON files on disk.
