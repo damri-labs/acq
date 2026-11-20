@@ -25,6 +25,11 @@
 //  7. Refusal leaves the stored session byte-identical.
 //  8. A tokenless session that still carries a credential (recovery
 //     secret) is guarded exactly like a tokened one.
+//
+// The CLI under test defaults to the sibling acq.js; set
+// ACQ_CLI_UNDER_TEST to an absolute path to run the same checks against
+// another artifact (test-pinned-cli-behavior.mjs uses this to exercise
+// the immutable pinned download instead of the working tree).
 // Run: node test-session-guard.mjs
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -33,7 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CLI = join(fileURLToPath(new URL(".", import.meta.url)), "acq.js");
+const CLI = process.env.ACQ_CLI_UNDER_TEST || join(fileURLToPath(new URL(".", import.meta.url)), "acq.js");
 const UIN1 = "AAAA-BBBB-0001", UIN2 = "CCCC-DDDD-0002";
 
 let requests = 0;
@@ -66,7 +71,7 @@ function check(name, cond, extra) {
 
 function run(home, args) {
   return new Promise((resolve) => {
-    const p = spawn("node", [CLI, ...args], { env: { ...process.env, HOME: home, ACQ_SERVER: BASE } });
+    const p = spawn(process.execPath, [CLI, ...args], { env: { ...process.env, HOME: home, ACQ_SERVER: BASE } });
     let out = "", err = "";
     p.stdout.on("data", d => out += d);
     p.stderr.on("data", d => err += d);
