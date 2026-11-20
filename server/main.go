@@ -2401,6 +2401,9 @@ func main() {
 	mux.HandleFunc("/analytics", handleAnalytics)
 	mux.HandleFunc("/mcp", handleMCP)
 	mux.HandleFunc("/feedback", handleFeedback)
+	if practicePeerEnabled() {
+		mux.HandleFunc("/practice", handlePractice)
+	}
 	mux.HandleFunc("/auth/login", handleAuthLogin)
 	mux.HandleFunc("/auth/callback", handleAuthCallback)
 	mux.HandleFunc("/auth/logout", handleAuthLogout)
