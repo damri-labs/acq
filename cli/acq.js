@@ -437,7 +437,7 @@ switch (cmd) {
     }
     // no-answer / unknown: the seat may be claimed, but no usable
     // credential reached this machine - it cannot be reclaimed from here.
-    console.error(`join outcome unknown${r.status ? ` (error ${r.status})` : ""} - the seat may or may not be claimed. One retry is safe while the seat is free; if it answers \"room full\", your earlier join committed but its credential never arrived, and the seat cannot be reclaimed without the recovery code from that lost answer.`);
+    console.error(`join outcome unknown${r.status ? ` (error ${r.status})` : ""} - the seat may or may not be claimed. One retry is safe while the seat is free; a later "room full" does not identify who holds it: your earlier join may have committed, or another participant may have joined. Without a saved credential or recovery code, this machine cannot reclaim the seat. Contact the room's creator to confirm the intended participant and arrange a fresh room if needed.`);
     process.exit(1);
   }
   case "send": {
