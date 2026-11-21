@@ -82,8 +82,22 @@ Ready-to-run integration examples against the live service live in a separate re
 The server is a single Go binary with no external dependencies:
 
 ```bash
-cd server && go build -o acq . && ./acq
+cd server && go build -o acq .
+# Use private, writable local storage instead of the container default /data.
+ACQ_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/acq-local.XXXXXXXX")"
+printf 'Local state directory: %s\n' "$ACQ_DATA_DIR"
+ROOMS_DIR="$ACQ_DATA_DIR/rooms" STATS_FILE="$ACQ_DATA_DIR/stats.json" \
+  FEEDBACK_FILE="$ACQ_DATA_DIR/feedback.log" ./acq
 ```
+
+Keep that directory path if you want to resume the same local rooms: use it again
+instead of running `mktemp` next time. Your OS may clean temporary storage; for
+longer-lived hosting, set the three paths to a private persistent directory you
+own. Room files contain bearer/recovery credentials. Do not commit or share them.
+The container defaults below remain unchanged. Startup refuses an unusable room
+directory before listening; this point-in-time probe does not guarantee later
+writes, capacity, durability or availability. Stats and feedback paths are not
+probed at startup; their write outcomes remain reported by their existing paths.
 
 Configuration is by environment variable (read in `server/main.go` and `server/auth.go`):
 
