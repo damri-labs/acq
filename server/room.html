@@ -573,10 +573,13 @@
         if (ended || gone) return;
         endConfirm.hidden = false;
         endBtn.hidden = true;
+        // Start on the safe choice; opening the prompt must never confirm it.
+        endNo.focus();
       });
       endNo.addEventListener('click', function(){
         endConfirm.hidden = true;
         endBtn.hidden = false;
+        endBtn.focus();
       });
       endYes.addEventListener('click', function(){
         if (ended || gone || endYes.disabled) return;
