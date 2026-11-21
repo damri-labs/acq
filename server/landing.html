@@ -364,16 +364,24 @@ document.getElementById('fb').addEventListener('submit', function(e){
     var blob = inp.value.trim();
     var c = unpack(blob);
     if (!c) { status.textContent = 'That does not look like an acq1_ credential.'; return; }
-    var items = load().filter(function(b){
-      var x = unpack(b);
-      return !x || x.uin !== c.uin || x.seat !== c.seat;
-    });
-    var replaced = items.length !== load().length;
-    items.push(blob);
-    store(items);
-    inp.value = '';
-    status.textContent = (replaced ? 'Updated ' : 'Saved ') + c.uin + ' (seat ' + (c.seat || '?') + ') in this browser.';
-    render();
+    try {
+      var raw = localStorage.getItem(KEY);
+      var existing = raw === null ? [] : JSON.parse(raw);
+      if (!Array.isArray(existing)) throw new Error('invalid saved-room storage');
+      var items = existing.filter(function(b){
+        var x = unpack(b);
+        return !x || x.uin !== c.uin || x.seat !== c.seat;
+      });
+      var replaced = items.length !== existing.length;
+      items.push(blob);
+      store(items);
+      if (localStorage.getItem(KEY) !== JSON.stringify(items)) throw new Error('save readback failed');
+      inp.value = '';
+      status.textContent = (replaced ? 'Updated ' : 'Saved ') + c.uin + ' (seat ' + (c.seat || '?') + ') in this browser.';
+      render();
+    } catch(e) {
+      status.textContent = 'Could not confirm the save. Your credential is still in the box. Keep a safe copy and retry when browser storage is available. Do not assume this seat is saved yet.';
+    }
   });
   render();
 })();
