@@ -244,10 +244,10 @@ curl -s -X POST <span class="u">https://acq.damri.org</span>/room/<span class="g
     <h2>Saved rooms</h2>
     <p>Seat tokens live in the create/join response - lose that output and getting the seat back takes the recovery flow, so it is worth keeping. Every create, join, and rejoin response carries a <b>credential</b> string (<b>acq1_...</b>) packing the room UIN, seat token, and that seat's recovery secret (the pairing code on seat A, the recovery code from the join response on seat B) into one value. Paste it here to keep it in this browser (localStorage only - nothing leaves the page), and copy a restore snippet when you need it back in a console.</p>
     <div class="cred-row">
-      <input id="cred-in" type="text" placeholder="acq1_..." autocomplete="off" spellcheck="false">
+      <input id="cred-in" aria-label="Private saved-room credential" type="text" placeholder="acq1_..." autocomplete="off" spellcheck="false">
       <button id="cred-save" type="button">Save</button>
     </div>
-    <div id="cred-status"></div>
+    <div id="cred-status" role="status" aria-live="polite" aria-atomic="true"></div>
     <ul id="cred-list"></ul>
   </section>
 
