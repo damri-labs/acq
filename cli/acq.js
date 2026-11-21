@@ -492,24 +492,33 @@ switch (cmd) {
       // cover the delayed-commit window and the only honest outcomes are
       // verified-sent and unknown. This never re-sends: re-sending stays
       // the operator's explicit decision.
+      let negativeChecks = 0;
       for (let attempt = 0; attempt < 3; attempt++) {
         if (attempt) await new Promise(r => setTimeout(r, 2000));
         let v;
         try {
-          v = await api("GET", `/room/${room}/msg?self=1&peek=1&since=0`, { token: state.token });
+          // A failed verification read is not the send's outcome. Unlike
+          // api(), this path must not exit on a definite HTTP read error:
+          // keep the remaining checks and the final cid/uncertainty report.
+          const check = await request(`${BASE}/room/${room}/msg?self=1&peek=1&since=0`, { headers: state.token ? { Authorization: `Bearer ${state.token}` } : {} });
+          if (!check.ok) continue;
+          v = await check.json();
+          if (!v || !Array.isArray(v.messages)) continue;
         } catch { continue; }
-        const hit = v.messages.find(m => m.cid === cid);
+        const hit = v.messages.find(m => m && m.cid === cid && Number.isSafeInteger(m.seq) && m.seq >= 1);
         if (hit) {
           console.log(`sent seq=${hit.seq} (verified after an ambiguous failure)`);
           process.exit(0);
         }
+        negativeChecks++;
       }
-      if (received && typed === "definite") {
+      const checkSummary = negativeChecks === 3 ? "repeated transcript checks are negative" : "transcript verification is incomplete";
+      if (received && typed === "definite" && negativeChecks === 3) {
         console.error(`${received} - the server typed this a definite pre-commit rejection and repeated transcript checks are negative (id ${cid}): the message was not stored and re-sending as-is is safe. If the answer came from an intermediary rather than the server, the original may still land - when it matters, re-check with 'acq log --self'.`);
         process.exit(1);
       }
       if (received) {
-        console.error(`${received} - but whether the request was stored is unconfirmed (id ${cid}); repeated transcript checks are negative. The answer may not have come from the ACQ server itself: re-check with 'acq log --self' before deciding; re-sending risks a duplicate if the original lands.`);
+        console.error(`${received} - but whether the request was stored is unconfirmed (id ${cid}); ${checkSummary}. The answer may not have come from the ACQ server itself: re-check with 'acq log --self' before deciding; re-sending risks a duplicate if the original lands.`);
         process.exit(1);
       }
       console.error(`send outcome unknown - the server has not confirmed storing it (id ${cid}). The original request may still land later. Check with 'acq log --self' before deciding; re-sending now risks a duplicate if the original arrives.`);
