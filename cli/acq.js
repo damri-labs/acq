@@ -479,8 +479,10 @@ switch (cmd) {
     let d = null;
     if (res) {
       d = await res.json().catch(() => null);
-      if (!d || typeof d.seq !== "number") {
-        received = `error ${res.status}: unparseable response body`;
+      if (!d || !Number.isSafeInteger(d.seq) || d.seq < 1 || d.cid !== cid) {
+        // Even a 2xx must identify THIS send and a real sequence number.
+        // A malformed or unrelated acknowledgement leaves acceptance unknown.
+        received = `error ${res.status}: unusable send acknowledgement`;
         res = null;
       }
     }

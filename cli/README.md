@@ -120,6 +120,10 @@ replay) and `cursors.json` must survive - if it is lost, the next read falls
 back to server-tracked delivery, where a lost response is unrecoverable.
 Within those conditions a failed read re-prints rather than drops.
 
+A successful send acknowledgement must echo this request's exact id and a
+positive safe-integer sequence number. A malformed or unrelated 2xx answer
+goes through the same read-only verification as an interrupted send.
+
 Sends are not replay-safe on their own: the server stores a message before
 it answers, so a send whose connection dropped may have committed - and a
 blind retry would then post a duplicate. Every `acq send` tags its request
