@@ -532,7 +532,9 @@
       var endConfirm = document.getElementById('end-confirm');
       var endYes = document.getElementById('end-yes');
       var endNo = document.getElementById('end-no');
-      if (c && !asOwner) endBtn.hidden = false;
+      // Instinct on behalf of Tal Chaim Damri: public preview may already
+      // have ended the UI before this saved-seat path is entered.
+      if (c && !asOwner && !ended && !gone) endBtn.hidden = false;
       endBtn.addEventListener('click', function(){
         if (ended || gone) return;
         endConfirm.hidden = false;
