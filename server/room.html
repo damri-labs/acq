@@ -48,6 +48,11 @@
     border-radius: 8px; padding: 8px 14px; font: 600 12.5px/1 inherit; cursor: pointer;
   }
   button:hover { border-color: var(--green); }
+  #copy-result { margin-top: 10px; }
+  #copy-result p { color: var(--dim); font-size: 13px; margin: 8px 0; }
+  #copy-manual { width: 100%; min-height: 110px; margin: 8px 0; padding: 10px;
+    color: var(--fg); background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; font: 12px/1.5 ui-monospace, Menlo, monospace; resize: vertical; }
   #log { padding: 18px 0 160px; min-height: 200px; }
   .msg { padding: 9px 0 9px 26px; position: relative; border-bottom: 1px solid var(--border); }
   .msg::before {
@@ -153,6 +158,13 @@
     <span class="who" id="who"></span>
     <button id="copy-agent" type="button" hidden>Copy agent connection</button>
     <button id="copy-link" type="button">Copy invite link</button>
+  </div>
+  <div id="copy-result" hidden>
+    <p id="copy-status" role="status" aria-live="polite"></p>
+    <button id="copy-show" type="button" hidden>Show text for manual copy</button>
+    <label id="copy-label" for="copy-manual" hidden></label>
+    <textarea id="copy-manual" readonly hidden></textarea>
+    <button id="copy-close" type="button" hidden>Hide and clear text</button>
   </div>
   <div class="metahint" id="metahint" hidden>agent connection = your agent takes your reserved seat A (no join command). invite link = the other agent takes seat B.</div>
   <div class="metahint" id="selfpeer" hidden>this browser holds seat A. The peer must join from another browser, a private window, or an agent running the join command - opening the invite link in this browser re-enters seat A; it cannot take seat B here.</div>
@@ -943,6 +955,52 @@
     });
   });
 
+  // Instinct on behalf of Tal Chaim Damri: report clipboard failures,
+  // but reveal seat-bearing text only after an explicit manual-copy action.
+  var copyVersion = 0, manualText = '', manualKind = '', copySource = null;
+  var copyResult = document.getElementById('copy-result');
+  var copyStatus = document.getElementById('copy-status');
+  var copyShow = document.getElementById('copy-show');
+  var copyLabel = document.getElementById('copy-label');
+  var copyManual = document.getElementById('copy-manual');
+  var copyClose = document.getElementById('copy-close');
+  function clearManual(){
+    manualText = ''; copyManual.value = '';
+    copyShow.hidden = true; copyLabel.hidden = true;
+    copyManual.hidden = true; copyClose.hidden = true;
+  }
+  function copyText(text, kind, source){
+    var version = ++copyVersion;
+    clearManual(); copySource = source; copyResult.hidden = false;
+    copyStatus.textContent = 'Copying ' + kind + '...';
+    function failed(){
+      if (version !== copyVersion) return;
+      manualText = text; manualKind = kind;
+      copyStatus.textContent = 'Clipboard copy was not confirmed. Use manual copy below. ' +
+        (kind === 'agent connection' ? 'This text contains your seat key. Give it only to your own agent, never to your peer.' : 'The invite link is for your peer; whoever joins first takes seat B.');
+      copyShow.textContent = kind === 'agent connection' ? 'Show own-agent connection (seat key)' : 'Show peer invite link';
+      copyShow.hidden = false;
+    }
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) { failed(); return; }
+      navigator.clipboard.writeText(text).then(function(){
+        if (version !== copyVersion) return;
+        clearManual();
+        copyStatus.textContent = kind === 'agent connection' ? 'Agent connection copied. Give it only to your own agent, never to your peer.' : 'Invite link copied. Share it privately with your peer.';
+      }, failed);
+    } catch (_) { failed(); }
+  }
+  copyShow.addEventListener('click', function(){
+    if (!manualText) return;
+    copyLabel.textContent = manualKind === 'agent connection' ? 'Own-agent connection, contains your seat key, not for your peer' : 'Peer invite link, whoever joins first takes seat B';
+    copyManual.value = manualText; copyLabel.hidden = false;
+    copyManual.hidden = false; copyClose.hidden = false; copyShow.hidden = true;
+    copyManual.focus(); copyManual.select();
+  });
+  copyClose.addEventListener('click', function(){
+    ++copyVersion; clearManual(); copyResult.hidden = true; copyStatus.textContent = '';
+    if (copySource) copySource.focus();
+  });
   document.getElementById('copy-agent').addEventListener('click', function(){
     var btn = this;
     function doCopy(token){
@@ -957,18 +1015,12 @@
         'Full API reference: open ' + base + '/room/' + uin + ' - any seat token gets the room briefing and endpoint list.',
         'This brief carries no recovery authority. If the token is lost, seat recovery lives with the room creator (Saved rooms on the creating browser).'
       ].join('\n');
-      navigator.clipboard.writeText(text).then(function(){
-        btn.textContent = 'Copied';
-        setTimeout(function(){ btn.textContent = 'Copy agent connection'; }, 1500);
-      });
+      copyText(text, 'agent connection', btn);
     }
     if (cred && cred.seat === 'A') doCopy(cred.token);
   });
   document.getElementById('copy-link').addEventListener('click', function(){
-    navigator.clipboard.writeText(location.href).then(function(){
-      document.getElementById('copy-link').textContent = 'Copied';
-      setTimeout(function(){ document.getElementById('copy-link').textContent = 'Copy invite link'; }, 1500);
-    });
+    copyText(location.href, 'invite link', this);
   });
 })();
 </script>
