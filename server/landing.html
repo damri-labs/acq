@@ -312,7 +312,9 @@ document.getElementById('fb').addEventListener('submit', function(e){
     return b64 + '='.repeat((4 - b64.length % 4) % 4);
   }
   function unpack(blob){
-    if (!blob || blob.slice(0,5) !== 'acq1_') return null;
+    // Instinct on behalf of Tal Chaim Damri: one invalid stored value
+    // must not hide later saved rooms or block a valid manual restore.
+    if (typeof blob !== 'string' || blob.slice(0,5) !== 'acq1_') return null;
     try {
       var c = JSON.parse(atob(stdB64(blob)));
       if (!c.uin || !c.token) return null;
