@@ -576,6 +576,9 @@
           headers: postHeaders,
           body: JSON.stringify({ text: '', end: true })
         }).then(function(r){
+          // Instinct on behalf of Tal Chaim Damri: a late End response
+          // must not reopen controls after an authoritative terminal read.
+          if (ended || gone) return;
           if (r.ok) { pollNow(); return; }
           if (r.status === 404) { showGone(); return; }
           // Same ended-vs-expired distinction as the send path: a 410 here
@@ -590,6 +593,7 @@
           // proxy can answer before the server does) - no state claim,
           // re-sync from the server instead.
           return r.json().catch(function(){ return null; }).then(function(d){
+            if (ended || gone) return;
             if (d && d.stored === false) {
               sendErr.textContent = 'End failed - the server confirmed nothing was stored. The room is still open.';
               endYes.disabled = false; endNo.disabled = false;
@@ -607,6 +611,7 @@
             pollNow();
           });
         }).catch(function(){
+          if (ended || gone) return;
           // Same discipline as send: never claim delivery the client did
           // not see, never auto-retry - and never claim the room is still
           // open either: the end may have committed while the response was
