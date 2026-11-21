@@ -5,11 +5,10 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer } from "node:net";
 import { once } from "node:events";
 
 const source = resolve(
@@ -18,17 +17,6 @@ const source = resolve(
 );
 const requestOptions = { timeout: 3000 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function unusedPort() {
-  const s = createServer();
-  await new Promise((r, reject) => {
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", r);
-  });
-  const port = s.address().port;
-  await new Promise((r, reject) => s.close((e) => (e ? reject(e) : r())));
-  return port;
-}
 
 async function stop(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
@@ -70,55 +58,62 @@ test(
     try {
       const binary = join(
         dir,
-        process.platform === "win32" ? "acq.exe" : "acq",
+        process.platform === "win32" ? "acq-sdk-fixture.exe" : "acq-sdk-fixture",
       );
-      const build = spawnSync("go", ["build", "-o", binary, "."], {
+      const build = spawnSync("go", ["test", "-c", "-o", binary, "."], {
         cwd: source,
         encoding: "utf8",
         timeout: 60000,
       });
       assert.ifError(build.error);
       assert.equal(build.status, 0, build.stderr);
-      const port = await unusedPort();
-      // URL is constructed here, never accepted from an argument or environment.
-      const base = `http://127.0.0.1:${port}`;
+      const readyFile = join(dir, "fixture-ready");
       const env = {
         PATH: process.env.PATH,
         HOME: dir,
         ...(process.env.SystemRoot
           ? { SystemRoot: process.env.SystemRoot }
           : {}),
-        PORT: String(port),
+        TMPDIR: dir,
+        TMP: dir,
+        TEMP: dir,
+        ACQ_SDK_FIXTURE_READY: readyFile,
         ROOMS_DIR: join(dir, "rooms"),
         STATS_FILE: join(dir, "stats.json"),
         FEEDBACK_FILE: join(dir, "feedback.json"),
         ANALYTICS_FILE: join(dir, "analytics.json"),
-        ACQ_PUBLIC_BASE_URL: base,
       };
       // Runtime gets only temporary storage and non-secret process essentials.
       // No production auth, analytics token, fault injection or session settings.
-      child = spawn(binary, [], { cwd: dir, env, stdio: "ignore" });
+      child = spawn(binary, ["-test.run=^TestSDKFixture$", "-test.timeout=85s"], {
+        cwd: dir,
+        env,
+        stdio: "ignore",
+      });
       let spawnError;
       child.on("error", (e) => {
         spawnError = e;
       });
-      let ready = false;
+      let base;
       for (let n = 0; n < 100; n++) {
         if (spawnError) throw spawnError;
         if (child.exitCode !== null)
           throw new Error("local ACQ exited before readiness");
         try {
-          if (
-            (await fetch(`${base}/stats`, { signal: AbortSignal.timeout(250) }))
-              .ok
-          ) {
-            ready = true;
-            break;
-          }
+          const candidate = (await readFile(readyFile, "utf8")).trim();
+          const url = new URL(candidate);
+          assert.equal(url.protocol, "http:");
+          assert.equal(url.hostname, "127.0.0.1");
+          assert.match(url.port, /^\d+$/);
+          assert.equal(url.pathname, "/");
+          assert.equal(url.search, "");
+          assert.equal(url.hash, "");
+          base = url.origin;
+          break;
         } catch {}
         await sleep(25);
       }
-      assert.equal(ready, true, "local ACQ failed to become ready");
+      assert.ok(base, "local ACQ fixture failed to become ready");
       await Promise.all([
         a.connect(
           new StreamableHTTPClientTransport(new URL(`${base}/mcp`)),

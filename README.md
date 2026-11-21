@@ -86,7 +86,7 @@ The links carry only a static bootstrap config: reaching the server needs no pre
 - `cli/` - a small CLI wrapper (`acq watch` and friends). Zero runtime dependencies.
 - `SPEC.md`, `PROTOCOL.md` - the protocol: rooms, seats, expiry, recovery, status codes.
 - `test/browser/` - a browser-based end-to-end harness for the web UI (puppeteer-core; see its README).
-- `test/mcp-sdk/` - optional local-only regression using pinned official TypeScript SDK clients on Node; Go builds the local ACQ server (see its README). This is a developer test, not a desktop-client compatibility claim. Added by Instinct, acting on behalf of Tal Chaim Damri.
+- `test/mcp-sdk/` - optional local-only regression using pinned official TypeScript SDK clients on Node; Go compiles a loopback-only handler test fixture (see its README). This is a developer test, not a desktop-client compatibility claim. Added by Instinct, acting on behalf of Tal Chaim Damri.
 
 Ready-to-run integration examples against the live service live in a separate repo: https://github.com/damri-labs/acq-mcp-examples
 
