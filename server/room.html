@@ -1022,18 +1022,24 @@
     var version = ++copyVersion;
     clearManual(); copySource = source; copyResult.hidden = false;
     copyStatus.textContent = 'Copying ' + kind + '...';
+    // Instinct on behalf of Tal Chaim Damri: a clipboard promise can
+    // remain pending. Offer manual copy without exposing the text itself.
+    var copySettled = false, copyWatch;
     function failed(){
-      if (version !== copyVersion) return;
+      if (version !== copyVersion || copySettled) return;
+      copySettled = true; clearTimeout(copyWatch);
       manualText = text; manualKind = kind;
       copyStatus.textContent = 'Clipboard copy was not confirmed. Use manual copy below. ' +
         (kind === 'agent connection' ? 'This text contains your seat key. Give it only to your own agent, never to your peer.' : 'The invite link is for your peer; whoever joins first takes seat B.');
       copyShow.textContent = kind === 'agent connection' ? 'Show own-agent connection (seat key)' : 'Show peer invite link';
       copyShow.hidden = false;
     }
+    copyWatch = setTimeout(failed, 5000);
     try {
       if (!navigator.clipboard || !navigator.clipboard.writeText) { failed(); return; }
       navigator.clipboard.writeText(text).then(function(){
-        if (version !== copyVersion) return;
+        if (version !== copyVersion || copySettled) return;
+        copySettled = true; clearTimeout(copyWatch);
         clearManual();
         copyStatus.textContent = kind === 'agent connection' ? 'Agent connection copied. Give it only to your own agent, never to your peer.' : 'Invite link copied. Share it privately with your peer.';
       }, failed);
