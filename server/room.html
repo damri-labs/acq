@@ -774,7 +774,9 @@
       };
       document.getElementById('idretry').addEventListener('click', function(){
         idfail.hidden = true;
-        setStatus(p);
+        // Instinct on behalf of Tal Chaim Damri: preview failure leaves
+        // p null. It must not prevent a fresh identity check on Retry.
+        if (p) setStatus(p);
         probe();
       });
       probe();
