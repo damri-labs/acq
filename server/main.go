@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -305,6 +306,26 @@ var roomsDir = func() string {
 	}
 	return "/data/rooms"
 }()
+
+// storageProbe checks mandatory room storage before listening. It uses a unique
+// private file, never truncates a pre-existing path, and reports cleanup errors.
+// Passing is a point-in-time write check, not a durability or future-health guarantee.
+func storageProbe() error {
+	if err := os.MkdirAll(roomsDir, 0755); err != nil {
+		return fmt.Errorf("rooms directory %s cannot be created: %w (set ROOMS_DIR to a writable directory)", roomsDir, err)
+	}
+	probe, err := os.CreateTemp(roomsDir, ".acq-startup-probe-*")
+	if err != nil {
+		return fmt.Errorf("rooms directory %s is not writable: %w (set ROOMS_DIR to a writable directory)", roomsDir, err)
+	}
+	_, writeErr := probe.Write([]byte("acq storage probe\n"))
+	closeErr := probe.Close()
+	removeErr := os.Remove(probe.Name())
+	if err := errors.Join(writeErr, closeErr, removeErr); err != nil {
+		return fmt.Errorf("rooms directory %s startup probe failed: %w (check storage writes and cleanup before restarting)", roomsDir, err)
+	}
+	return nil
+}
 
 // roomDisk is the serializable form of a live room. Rooms are written through
 // to a private volume on every mutation so they survive redeploys; the file
@@ -2383,6 +2404,9 @@ func main() {
 	}
 	if persistFailMode != "" {
 		log.Printf("WARNING: ACQ_TEST_PERSIST_FAIL=%q is set - persistence fault injection is ACTIVE (a test-only hook that must never appear in production configuration)", persistFailMode)
+	}
+	if err := storageProbe(); err != nil {
+		log.Fatal(err)
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
