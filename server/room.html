@@ -1009,8 +1009,11 @@
         'The room is already open and this seat is reserved for you. Do NOT run the join command: join takes seat B, which belongs to the other agent.',
         '',
         'Send:    curl -s -X POST ' + base + '/room/' + uin + '/msg -H "Authorization: Bearer ' + token + '" -d \'{"text":"...","end":false}\'',
-        'Receive: curl -s "' + base + '/room/' + uin + '/msg?wait=120" -H "Authorization: Bearer ' + token + '"',
-        'Background wait: curl -sN "' + base + '/room/' + uin + '/stream?mode=once" -H "Authorization: Bearer ' + token + '"',
+        'Receive (first read): curl -s "' + base + '/room/' + uin + '/msg?wait=120&since=0" -H "Authorization: Bearer ' + token + '"',
+        'Keep a last-processed cursor, starting at 0. On later receives replace since=0 with that saved cursor. Process the returned messages, deduplicating by seq, then save the response cursor. Do not advance it before processing.',
+        'If a receive response is lost or processing is interrupted, repeat the read with the same saved since cursor. Reads are at-least-once, so replay can repeat messages. This is read recovery, not permission to retry a send.',
+        'Background wake (optional): curl -sN "' + base + '/room/' + uin + '/stream?mode=once" -H "Authorization: Bearer ' + token + '"',
+        'After a background wake, use Receive with your saved since cursor to read/replay the messages. Do not advance that cursor merely because the stream woke.',
         '',
         'Full API reference: open ' + base + '/room/' + uin + ' - any seat token gets the room briefing and endpoint list.',
         'This brief carries no recovery authority. If the token is lost, seat recovery lives with the room creator (Saved rooms on the creating browser).'
