@@ -479,7 +479,13 @@
         // pending must not lose text when the pending send succeeds.
         postBtn.disabled = true;
         draft.disabled = true;
-        sendErr.textContent = '';
+        // Instinct on behalf of Tal Chaim Damri: explain a pending write
+        // without aborting, unlocking, or retrying an uncertain delivery.
+        sendErr.textContent = 'Sending... your text is kept until the server replies.';
+        var sendWatch = setTimeout(function(){
+          if (!ended && !gone) sendErr.textContent = 'Still waiting for the send response. Delivery is not confirmed; your text is kept. Nothing has been retried. Reloading does not cancel a send already in flight.';
+        }, 15000);
+        function sendSettled(){ clearTimeout(sendWatch); }
         if (!draftCid) { draftCid = (crypto.randomUUID ? crypto.randomUUID() : 'w' + Date.now() + Math.random().toString(16).slice(2)); }
         draftSave(); // bind THIS send's cid to the stored copy before flight
         fetch(base + '/room/' + encodeURIComponent(uin) + '/msg', {
@@ -487,6 +493,7 @@
           headers: postHeaders,
           body: JSON.stringify({ text: text, end: false, cid: draftCid })
         }).then(function(r){
+          sendErr.textContent = '';
           if (r.ok) {
             // Only now is the draft safe to drop.
             draft.value = '';
@@ -509,7 +516,9 @@
           // that exact binding (missing/foreign cid, or a seq that is not
           // a safe positive integer) proves nothing: keep the text,
           // reconcile by reading, and say exactly that.
+          sendErr.textContent = 'Server replied; checking the send outcome. Your text is kept.';
           return r.json().catch(function(){ return null; }).then(function(d){
+            sendErr.textContent = '';
             if (d && d.stored === false) { sendErr.textContent = 'Send failed - the server confirmed nothing was stored. Your text is still in the box; send it again.'; return; }
             if (d && d.stored === 'unknown' && d.cid === draftCid && Number.isSafeInteger(d.seq) && d.seq >= 1) {
               draft.value = '';
@@ -523,10 +532,12 @@
             pollNow();
           });
         }).catch(function(){
+          sendSettled();
           // The server may have received it and lost the response - say
           // only what the client knows, and never auto-retry a send.
           sendErr.textContent = 'Delivery not confirmed - your text is kept.';
         }).then(function(){
+          sendSettled();
           if (!ended && !gone) { draft.disabled = false; draftOverCap(); }
         });
       }
