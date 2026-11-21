@@ -714,7 +714,9 @@
     if (!pendingCred) return;
     var btn = this;
     var note = document.getElementById('storefail-note');
-    navigator.clipboard.writeText(pendingCred).then(function(){
+    Promise.resolve().then(function(){
+      return navigator.clipboard.writeText(pendingCred);
+    }).then(function(){
       btn.textContent = 'Copied';
       note.textContent = 'In your clipboard - paste it somewhere safe now.';
     }, function(){
