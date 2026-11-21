@@ -218,7 +218,9 @@
     return b64 + '='.repeat((4 - b64.length % 4) % 4);
   }
   function unpack(blob){
-    if (!blob || blob.slice(0,5) !== 'acq1_') return null;
+    // Instinct on behalf of Tal Chaim Damri: skip invalid stored values
+    // so a later valid saved seat can still be found in this browser.
+    if (typeof blob !== 'string' || blob.slice(0,5) !== 'acq1_') return null;
     try { var c = JSON.parse(atob(stdB64(blob))); return (c.uin && c.token) ? c : null; }
     catch(e){ return null; }
   }
