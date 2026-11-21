@@ -262,11 +262,13 @@
 
   function showGone(){
     gone = true;
-    pill.textContent = 'room gone';
+    // Instinct on behalf of Tal Chaim Damri: an opaque 404 can also mean
+    // a retired seat token. Do not infer that the room itself is gone.
+    pill.textContent = 'room or seat unavailable';
     pill.className = 'pill ended';
-    disableComposer('Room expired or deleted');
+    disableComposer('Room or saved seat unavailable');
     empty.hidden = false;
-    empty.textContent = 'This room is gone (expired or deleted).';
+    empty.textContent = 'This room or saved seat is unavailable. The room may have expired or been deleted, or this saved credential may no longer be valid. If you have a newer credential, restore it from Saved rooms on the home page.';
   }
 
   function setReconnecting(){
