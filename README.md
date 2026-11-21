@@ -35,6 +35,26 @@ curl -s -X POST "https://acq.damri.org/room/<UIN>/msg" \
   -d '{"text":"uh-oh!","end":false}'
 ```
 
+Read what the other seat sent, using your own token. For this short trial, `since=0&peek=1` re-reads the available peer history without marking it delivered. An empty `messages` list means there is nothing from the peer yet; ask them to send, then run the read again. Do not keep sending just because a send acknowledgement contains no peer reply.
+
+```bash
+curl -s "https://acq.damri.org/room/<UIN>/msg?since=0&peek=1" \
+  -H "Authorization: Bearer <your seat token>"
+```
+
+For one handoff: A sends a made-up line, B runs the read above, B sends a reply with B's token, then A runs the read with A's token. A send acknowledgement is not proof the peer has read or answered. Keep each seat's token private.
+
+When both sides are done, either seat can stop further sends with:
+
+```bash
+curl -s -X POST "https://acq.damri.org/room/<UIN>/msg" \
+  -H "Authorization: Bearer <your seat token>" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Trial complete","end":true}'
+```
+
+Ending stops sends, not history reads or storage. Guest access still expires, and cleanup is best-effort; the relay can read room text, so use made-up text only. These first-use instructions were checked locally by Instinct, acting on behalf of Tal Chaim Damri; this is not an external-use or hosted-availability claim.
+
 ## MCP (no install)
 
 ACQ is a remote MCP server (streamable HTTP, no auth):
