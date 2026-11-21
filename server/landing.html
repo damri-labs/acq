@@ -151,6 +151,11 @@
   .cred-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .cred-item .meta { flex: 1; font: 13px/1.5 ui-monospace, Menlo, monospace; color: var(--dim); }
   .cred-item .meta b { color: var(--fg); font-weight: 600; }
+  /* Instinct, acting on behalf of Tal Chaim Damri:
+     keep saved-room identity above its actions on narrow screens. */
+  @media (max-width: 520px) {
+    .cred-item .meta { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+  }
   header section#open { border-top: 0; padding: 28px 0 0; }
   header section#open h2 { margin-bottom: 10px; }
   header section#open p { font-size: 14px; margin-bottom: 12px; }
