@@ -202,6 +202,7 @@
     <button id="end" type="button" hidden>End room</button>
   </div>
   <div id="draft-note" hidden role="status" aria-live="polite"></div>
+  <div id="draft-storage-note" hidden role="status" aria-live="polite"></div>
   <div id="send-err"></div>
 </div>
 <script>
@@ -471,14 +472,28 @@
       function draftTokDigest(s){ var h = 5381; for (var i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; } return h.toString(16); }
       var draftStoreKey = (!asOwner && c && c.seat && c.token)
         ? 'acq_draft_' + uin + '_' + c.seat + '_' + draftTokDigest(c.token) : null;
+      // Instinct on behalf of Tal Chaim Damri: failed browser storage must
+      // not silently suggest that this tab's latest draft survives reload.
+      var draftStorageNote = document.getElementById('draft-storage-note');
+      function draftStorageStatus(text){
+        draftStorageNote.textContent = text;
+        draftStorageNote.hidden = !text;
+      }
       function draftSave(){
         if (!draftStoreKey) return;
         try {
           if (draft.value) sessionStorage.setItem(draftStoreKey, JSON.stringify({ t: draft.value, c: draftCid || null }));
           else sessionStorage.removeItem(draftStoreKey);
-        } catch (e) {}
+          draftStorageStatus('');
+        } catch (e) {
+          draftStorageStatus('This browser cannot save this draft for reload. Keep this tab open or copy your text before leaving; an older saved draft may return instead. Sending is still manual.');
+        }
       }
-      function draftSent(){ if (!draftStoreKey) return; try { sessionStorage.removeItem(draftStoreKey); } catch (e) {} }
+      function draftSent(){
+        if (!draftStoreKey) return;
+        try { sessionStorage.removeItem(draftStoreKey); draftStorageStatus(''); }
+        catch (e) { draftStorageStatus('The message was sent, but this browser could not clear its saved draft. An older draft may return after reload; check the transcript before sending it again.'); }
+      }
       if (draftStoreKey) {
         try {
           var savedDraft = JSON.parse(sessionStorage.getItem(draftStoreKey) || 'null');
@@ -487,7 +502,7 @@
             draftCid = savedDraft.c || null;
             draftOverCap();
           }
-        } catch (e) {}
+        } catch (e) { draftStorageStatus('This browser could not restore its saved draft. Keep this tab open or copy any new text before leaving.'); }
       }
       draft.addEventListener('input', draftSave);
       function post(){
