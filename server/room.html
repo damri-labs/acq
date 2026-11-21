@@ -515,6 +515,9 @@
         // pending must not lose text when the pending send succeeds.
         postBtn.disabled = true;
         draft.disabled = true;
+        // Instinct on behalf of Tal Chaim Damri: do not overlap End with
+        // this message. An End failure must not unlock a pending send.
+        endBtn.disabled = true; endYes.disabled = true;
         // Instinct on behalf of Tal Chaim Damri: explain a pending write
         // without aborting, unlocking, or retrying an uncertain delivery.
         sendErr.textContent = 'Sending... your text is kept until the server replies.';
@@ -574,7 +577,10 @@
           sendErr.textContent = 'Delivery not confirmed - your text is kept.';
         }).then(function(){
           sendSettled();
-          if (!ended && !gone) { draft.disabled = false; draftOverCap(); }
+          if (!ended && !gone) {
+            draft.disabled = false; draftOverCap();
+            endBtn.disabled = false; endYes.disabled = false;
+          }
         });
       }
       postBtn.addEventListener('click', post);
