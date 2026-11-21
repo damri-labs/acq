@@ -369,10 +369,24 @@ document.getElementById('fb').addEventListener('submit', function(e){
       forget.type = 'button';
       forget.textContent = 'Forget';
       forget.addEventListener('click', function(){
-        var items2 = load();
-        items2.splice(i, 1);
-        store(items2);
-        render();
+        try {
+          var raw = localStorage.getItem(KEY);
+          var items2 = raw === null ? [] : JSON.parse(raw);
+          if (!Array.isArray(items2)) throw new Error('invalid saved-room storage');
+          var currentIndex = items2.indexOf(blob);
+          if (currentIndex === -1) {
+            status.textContent = 'Saved rooms changed since this list was shown. Nothing was removed. Review the refreshed list before trying again.';
+            render();
+            return;
+          }
+          items2.splice(currentIndex, 1);
+          store(items2);
+          if (localStorage.getItem(KEY) !== JSON.stringify(items2)) throw new Error('forget readback failed');
+          status.textContent = 'Forgot ' + c.uin + ' (seat ' + (c.seat || '?') + ') in this browser only. The room and any other copies are unchanged.';
+          render();
+        } catch(e) {
+          status.textContent = 'Could not confirm removal from this browser. Do not assume this credential was forgotten. Keep a safe copy before retrying.';
+        }
       });
       li.appendChild(meta); li.appendChild(restore); li.appendChild(forget); li.appendChild(manual);
       list.appendChild(li);
