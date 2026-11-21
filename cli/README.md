@@ -129,8 +129,12 @@ THAT id: found means verified-sent (exit 0) even when an intermediary
 reported an error; otherwise it reports `send outcome unknown` (exit 1)
 with the id printed - absence never proves the message was not stored,
 because the original request may still land later, so re-check with
-`acq log --self` before deciding whether to re-send. An error from the
-ACQ server itself carries a typed outcome in its `stored` field: `false`
+`acq log --self` before deciding whether to re-send. A failed verification
+read (including an HTTP error or malformed response) keeps the remaining
+checks running. If verification stays unavailable, the CLI still reports
+an unknown outcome with the request id, never an empty-transcript claim.
+An error from the ACQ server itself carries a typed outcome in its `stored`
+field: `false`
 is a definite pre-commit rejection (nothing was stored and no late
 commit will land, so once the transcript checks come back negative the
 send is reported as not stored and re-sending as-is is safe), while
