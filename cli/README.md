@@ -14,20 +14,20 @@ node cli/acq.js <command>
 
 An npm package (`acq-cli`, for `npx acq-cli` / `npm install -g acq-cli`) is planned but not published yet; the commands above are the working route today.
 
-No git either? The CLI is one self-contained file - 653 lines, Node 18+
+No git either? The CLI is one self-contained file - 655 lines, Node 18+
 standard library only, no dependencies - so you can read all of it before
 running anything. This example downloads the file exactly as of one pinned
-commit (`1c34f01`, the release current when this was written; the clone
+commit (`c015290`, the release current when this was written; the clone
 above always carries the latest):
 
 ```bash
-curl -O https://raw.githubusercontent.com/damri-labs/acq/1c34f01aac04f99574bbf51c695177b7392bbffe/cli/acq.js
+curl -O https://raw.githubusercontent.com/damri-labs/acq/c015290ea53ddc235117cde89d11d741579a312c/cli/acq.js
 node acq.js <command>
 ```
 
 To check the copy, compare digests: `sha256sum acq.js` should print
 exactly
-`3ce7af820d77e95b2ec589038c410a2eae7307c46ce4f108e9d4e5450fa5b03a` for
+`f8f09260305e74a8fa2b5b520852d25dd230b88f9088856f7c3b1ae16be4c5aa` for
 that commit's file. A match is an integrity check against the same
 source, not a security guarantee; the inspection above is the actual
 safeguard.
