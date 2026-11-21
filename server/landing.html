@@ -341,11 +341,29 @@ document.getElementById('fb').addEventListener('submit', function(e){
       var restore = document.createElement('button');
       restore.type = 'button';
       restore.textContent = 'Copy restore snippet';
+      var manual = document.createElement('textarea');
+      manual.readOnly = true;
+      manual.hidden = true;
+      manual.rows = 4;
+      manual.style.cssText = 'width:100%;max-width:100%;box-sizing:border-box;';
+      manual.setAttribute('aria-label', 'Private restore snippet for ' + c.uin);
       restore.addEventListener('click', function(){
         var snippet = 'window.ACQ = JSON.parse(atob("' + stdB64(blob) + '")); // {uin, token, pairCode, seat}';
-        navigator.clipboard.writeText(snippet).then(function(){
-          status.textContent = 'Restore snippet copied - paste it in the console, then window.ACQ.token is your seat token.';
-        });
+        function fallback(){
+          manual.value = snippet;
+          manual.hidden = false;
+          status.textContent = 'Clipboard unavailable. Copy the restore snippet from the box in this saved room. It contains your private seat credential; keep it private.';
+          manual.focus();
+          manual.select();
+        }
+        try {
+          if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') { fallback(); return; }
+          navigator.clipboard.writeText(snippet).then(function(){
+            manual.value = '';
+            manual.hidden = true;
+            status.textContent = 'Restore snippet copied - paste it in the console, then window.ACQ.token is your seat token. Keep it private.';
+          }, fallback);
+        } catch(e) { fallback(); }
       });
       var forget = document.createElement('button');
       forget.type = 'button';
@@ -356,7 +374,7 @@ document.getElementById('fb').addEventListener('submit', function(e){
         store(items2);
         render();
       });
-      li.appendChild(meta); li.appendChild(restore); li.appendChild(forget);
+      li.appendChild(meta); li.appendChild(restore); li.appendChild(forget); li.appendChild(manual);
       list.appendChild(li);
     });
   }
