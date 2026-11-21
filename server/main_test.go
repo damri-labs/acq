@@ -746,3 +746,82 @@ func TestCanonicalBaseURLIgnoresHostHeaders(t *testing.T) {
 		t.Fatalf("MCP share line poisoned by Host header:\n%s", mcreated.Share)
 	}
 }
+
+// TestStorageProbe checks startup rejection, existing-data safety and cleanup.
+func TestStorageProbe(t *testing.T) {
+	oldRooms := roomsDir
+	defer func() { roomsDir = oldRooms }()
+	dir := t.TempDir()
+	blocker := dir + "/blocker"
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	roomsDir = blocker + "/rooms"
+	if err := storageProbe(); err == nil || !strings.Contains(err.Error(), "ROOMS_DIR") {
+		t.Fatalf("expected actionable error, got %v", err)
+	}
+	roomsDir = dir + "/fresh/rooms"
+	if err := storageProbe(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(roomsDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("probe residue: %v %v", entries, err)
+	}
+
+	// Existing room and legacy fixed-name file must never be opened or removed.
+	for _, name := range []string{"existing.json", ".write-probe"} {
+		if err := os.WriteFile(roomsDir+"/"+name, []byte("preserve"), 0400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := storageProbe(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"existing.json", ".write-probe"} {
+		b, err := os.ReadFile(roomsDir + "/" + name)
+		if err != nil || string(b) != "preserve" {
+			t.Fatalf("existing path changed: %s %q %v", name, b, err)
+		}
+	}
+	if err := os.Remove(roomsDir + "/.write-probe"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(roomsDir+"/existing.json", roomsDir+"/.write-probe"); err != nil {
+		t.Fatal(err)
+	}
+	if err := storageProbe(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(roomsDir + "/existing.json")
+	if err != nil || string(b) != "preserve" {
+		t.Fatalf("symlink target changed: %q %v", b, err)
+	}
+	if fi, err := os.Lstat(roomsDir + "/.write-probe"); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink changed: %v", err)
+	}
+	entries, err = os.ReadDir(roomsDir)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("probe residue: %v %v", entries, err)
+	}
+}
+
+func TestStorageProbeReadOnlyDirectory(t *testing.T) {
+	oldRooms := roomsDir
+	defer func() { roomsDir = oldRooms }()
+	roomsDir = t.TempDir()
+	if err := os.Chmod(roomsDir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(roomsDir, 0700)
+	// Test ability, not uid: elevated runners can bypass Unix mode bits.
+	f, err := os.CreateTemp(roomsDir, ".permission-control-*")
+	if err == nil {
+		f.Close()
+		os.Remove(f.Name())
+		t.Skip("runner can write through directory mode bits")
+	}
+	if err := storageProbe(); err == nil || !strings.Contains(err.Error(), "ROOMS_DIR") {
+		t.Fatalf("read-only directory accepted: %v", err)
+	}
+}
