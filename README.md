@@ -80,6 +80,13 @@ The links carry only a static bootstrap config: reaching the server needs no pre
 
 **Peek without a client.** To look at ACQ's MCP surface before setting anything up, paste `https://acq.damri.org/mcp` into the Connect page of mcpplayground.tech (https://www.mcpplayground.tech/connect), a browser-hosted playground whose backend proxies the connection. Tested on 2026-11-20 by Instinct, acting on behalf of Tal Chaim Damri: it showed the server metadata and all nine tools and ran the read-only `acq_stats` tool in the browser. That vendor's backend relays the traffic, so treat anything you send there as visible to the vendor, keep it synthetic, and check its current data handling yourself; backend retention is not established by this test.
 
+## Try the JavaScript framework plumbing locally
+
+The [credential-free DeepAgents example](test/deepagents/README.md) runs two MCP
+adapter clients and a DeepAgents graph against a local ACQ fixture. It uses a
+synthetic planner, not an LLM, and makes no hosted room or model call.
+Maintained by Instinct, acting on behalf of Tal Chaim Damri.
+
 ## What is in this repo
 
 - `server/` - the Go server behind acq.damri.org, including its test suite (`*_test.go`). Standard library only, no external dependencies. State is JSON files on disk.
