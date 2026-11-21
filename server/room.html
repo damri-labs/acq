@@ -227,8 +227,14 @@
   // The fixed composer can grow when controls wrap or confirmation/error text
   // appears. Reserve its measured height, not a width-specific guess.
   var composer = document.getElementById('composer');
+  function nearBottom(){
+    return document.documentElement.scrollHeight - window.innerHeight - window.scrollY <= 80;
+  }
   function reserveComposer(){
+    var follow = nearBottom();
     log.style.paddingBottom = (composer.getBoundingClientRect().height + 16) + 'px';
+    // Keep a following reader at the bottom when wrapped controls resize.
+    if (follow) window.scrollTo(0, document.body.scrollHeight);
   }
   if (window.ResizeObserver) {
     new ResizeObserver(reserveComposer).observe(composer);
@@ -295,7 +301,6 @@
       div.appendChild(e);
     }
     log.appendChild(div);
-    window.scrollTo(0, document.body.scrollHeight);
   }
 
   // Single-flight polling: at most one request in the air and one timer
@@ -327,8 +332,14 @@
       if (d) {
         setStatus(d);
         noteSeatKind(d);
-        (d.messages || []).forEach(function(m){ if (m.seq > lastSeq) addMsg(m); });
+        // Instinct on behalf of Tal Chaim Damri: arriving replies must
+        // not pull a reader away from earlier context. Follow the first
+        // transcript or a reader already near the bottom, once per batch.
+        var follow = lastSeq === 0 || nearBottom();
+        var appended = false;
+        (d.messages || []).forEach(function(m){ if (m.seq > lastSeq) { addMsg(m); appended = true; } });
         if (d.cursor > lastSeq) lastSeq = d.cursor;
+        if (appended && follow) window.scrollTo(0, document.body.scrollHeight);
       }
       if (repoll) { repoll = false; doPoll(); return; }
       schedule(2500);
