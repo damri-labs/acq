@@ -11,7 +11,9 @@
   },
   "license": "MIT",
   "files": [
-    "acq.js"
+    "acq.js",
+    "test-pinned-cli-behavior.mjs",
+    "test-session-guard.mjs"
   ],
   "repository": {
     "type": "git",
