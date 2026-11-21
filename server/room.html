@@ -333,11 +333,17 @@
     // transcript of an already-ended room. schedule() owns the stop.
     inflight = true;
     var url = base + '/room/' + encodeURIComponent(uin) + '/msg?wait=0&since=' + lastSeq + (ownerMode ? '' : '&view=1');
-    fetch(url, { headers: headers }).then(function(r){
+    // Instinct on behalf of Tal Chaim Damri: a half-open read must not
+    // hold the single-flight lock forever. Bound headers AND body, then
+    // use the existing read backoff. This never retries a mutation.
+    var readAbort = new AbortController();
+    var readDeadline = setTimeout(function(){ readAbort.abort(); }, 30000);
+    fetch(url, { headers: headers, signal: readAbort.signal }).then(function(r){
       if (r.status === 404 || r.status === 410) { showGone(); return null; }
       if (!r.ok) { throw new Error('http ' + r.status); }
       return r.json();
     }).then(function(d){
+      clearTimeout(readDeadline);
       inflight = false;
       if (gone) return;
       backoff = 2500;
@@ -356,6 +362,7 @@
       if (repoll) { repoll = false; doPoll(); return; }
       schedule(2500);
     }).catch(function(){
+      clearTimeout(readDeadline);
       inflight = false;
       setReconnecting();
       var wait = backoff;
