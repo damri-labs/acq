@@ -158,6 +158,12 @@ failed or unusable answer is reported as unknown, without guessing.
 Both commands also store the full `credential` string (which packs the
 seat's recovery secret) in `session.json` when the server returns one.
 
+If a join reply is lost, a later `room full` response does not prove your
+join succeeded. The seat may belong to that earlier attempt or to another
+participant. Without a saved credential or recovery code, this machine
+cannot reclaim it. Contact the room's creator to confirm the intended
+participant and arrange a fresh room if needed.
+
 ## Hands-free: the watch pattern
 
 `acq watch` is built to run as a background process. It sits silently and
