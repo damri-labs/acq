@@ -270,7 +270,9 @@
     if (d.ended && !ended) { ended = true; disableComposer('Room ended'); }
   }
 
+  var endWaitStop = function(){};
   function disableComposer(why){
+    endWaitStop();
     var d = document.getElementById('draft'), b = document.getElementById('post');
     d.disabled = true; b.disabled = true;
     d.placeholder = why;
@@ -607,7 +609,21 @@
         if (ended || gone || endYes.disabled) return;
         endYes.disabled = true; endNo.disabled = true;
         postBtn.disabled = true; draft.disabled = true;
-        sendErr.textContent = '';
+        // Instinct on behalf of Tal Chaim Damri: a pending withdrawal
+        // needs a visible outcome boundary, not a blank locked composer.
+        // This timer only explains uncertainty. Never abort/retry End or
+        // unlock while its original request may still commit.
+        var endWaitText = 'Ending... waiting for the server to confirm. Your draft is kept.';
+        sendErr.textContent = endWaitText;
+        var endWatch = setTimeout(function(){
+          if (ended || gone) return;
+          endWaitText = 'Still waiting for the End response. End is not confirmed; the room may still be open. Nothing has been retried. Reloading does not cancel an End already in flight.';
+          sendErr.textContent = endWaitText;
+        }, 15000);
+        endWaitStop = function(){
+          clearTimeout(endWatch);
+          if (sendErr.textContent === endWaitText) sendErr.textContent = '';
+        };
         fetch(base + '/room/' + encodeURIComponent(uin) + '/msg', {
           method: 'POST',
           headers: postHeaders,
@@ -657,7 +673,7 @@
           endYes.disabled = false; endNo.disabled = false;
           if (!ended && !gone) { postBtn.disabled = false; draft.disabled = false; }
           pollNow();
-        });
+        }).then(function(){ endWaitStop(); });
       });
     }
     pollNow();
