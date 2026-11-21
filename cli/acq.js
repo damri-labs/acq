@@ -24,6 +24,49 @@ const BASE = process.env.ACQ_SERVER || "https://acq.damri.org";
 const DIR = join(homedir(), ".config", "acq");
 const FILE = join(DIR, "session.json");
 
+// Instinct, acting on behalf of Tal Chaim Damri.
+// A request budget includes its response body, not just response headers.
+const REQUEST_BUDGET_MS = 30000;
+const STREAM_IDLE_MS = 60000; // server heartbeats every 25 seconds
+async function request(url, options = {}) {
+  const u = new URL(url);
+  const stream = u.pathname.endsWith("/stream") && u.searchParams.get("mode") === "once";
+  const wait = Math.min(120, Math.max(0, Number(u.searchParams.get("wait")) || 0));
+  const controller = new AbortController();
+  let timer;
+  const arm = ms => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(new Error("ACQ request deadline exceeded; outcome may be unknown")), ms);
+  };
+  arm(REQUEST_BUDGET_MS + wait * 1000);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    let text;
+    if (stream && res.ok && res.body) {
+      // watch intentionally parks until an event. Bound silence, not its lifetime:
+      // each chunk (including a heartbeat) renews the idle allowance.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      text = "";
+      for (;;) {
+        arm(STREAM_IDLE_MS);
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } else {
+      text = await res.text();
+    }
+    return {
+      ok: res.ok, status: res.status, headers: res.headers,
+      json: async () => JSON.parse(text), text: async () => text,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Seat tokens are bearer credentials, so the state directory and files are
 // owner-only. Files are created 0600 (the mode option only applies at
 // creation), and pre-existing loose files - written by older versions or
@@ -173,7 +216,7 @@ async function safeRead(room, token, wait) {
 // contract.
 async function watchRead(room, token, wait) {
   const since = loadCursors()[room];
-  const res = await fetch(`${BASE}/room/${room}/msg?wait=${wait}${since === undefined ? "" : `&since=${since}`}`, { headers: { Authorization: `Bearer ${token}` } });
+  const res = await request(`${BASE}/room/${room}/msg?wait=${wait}${since === undefined ? "" : `&since=${since}`}`, { headers: { Authorization: `Bearer ${token}` } });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) return { ok: false, status: res.status, detail: data.detail || "request failed", retryAfter: Number(res.headers.get("retry-after")) || 0 };
   for (const m of data.messages) printMsg(m);
@@ -244,7 +287,7 @@ async function apiMut(method, path, { token, body, validate } = {}) {
   if (body) headers["Content-Type"] = "application/json";
   let res;
   try {
-    res = await fetch(BASE + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    res = await request(BASE + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   } catch {
     return { kind: "no-answer" };
   }
@@ -296,7 +339,7 @@ async function api(method, path, { token, body } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body) headers["Content-Type"] = "application/json";
-  const res = await fetch(BASE + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const res = await request(BASE + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     console.error(`error ${res.status}: ${data.detail || "request failed"}`);
@@ -409,7 +452,7 @@ switch (cmd) {
     if (state.token) headers.Authorization = `Bearer ${state.token}`;
     let res;
     try {
-      res = await fetch(BASE + `/room/${room}/msg`, { method: "POST", headers, body: JSON.stringify({ text, end: !!opts.end, cid }) });
+      res = await request(BASE + `/room/${room}/msg`, { method: "POST", headers, body: JSON.stringify({ text, end: !!opts.end, cid }) });
     } catch {
       res = null; // transport failure: no answer at all
     }
@@ -525,7 +568,7 @@ switch (cmd) {
       if (c.data.messages.length) process.exit(0);
       let text;
       try {
-        const res = await fetch(`${BASE}/room/${room}/stream?mode=once`, { headers: { Authorization: `Bearer ${state.token}` } });
+        const res = await request(`${BASE}/room/${room}/stream?mode=once`, { headers: { Authorization: `Bearer ${state.token}` } });
         if (!res.ok) {
           const d = await res.json().catch(() => ({}));
           if (goneRoom(res.status)) { console.log(`[${d.detail || "room not found"}]`); process.exit(2); }
