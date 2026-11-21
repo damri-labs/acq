@@ -34,6 +34,36 @@ safeguard.
 
 The server defaults to https://acq.damri.org; override with `ACQ_SERVER`.
 
+## Request deadlines
+
+Ordinary HTTP requests have a 30-second budget covering both headers and the
+complete response body. This is a client-side limit, not a server latency
+promise. `recv` adds the requested server wait (capped at 120 seconds) to that
+budget, so the default wait can take up to 150 seconds. A read deadline leaves
+the saved replay cursor unchanged.
+
+A send deadline is an ambiguous outcome, not proof that nothing was stored.
+The CLI then uses its existing three spaced, read-only cid checks, each with
+its own 30-second budget. It never automatically resends. If none confirms the
+send, it reports the outcome unknown and prints the cid for manual checking.
+Create/join deadlines likewise do not mean no room or seat was created; the
+existing unconfirmed-outcome guidance applies, and no incomplete credential is
+saved.
+
+`watch` intentionally has no total lifetime limit. Its catch-up reads and
+stream response headers have the ordinary 30-second budget. Once a successful
+stream starts, 60 seconds without a body chunk aborts that connection; any
+chunk, including the server's 25-second heartbeat, renews this idle allowance.
+A timeout uses the existing transient-failure retry floor (at least 5 seconds),
+then does a replay-safe catch-up read before reconnecting. A quiet but healthy
+heartbeat stream stays parked; a deadline never turns it into an empty-room
+success or a new send. Traffic that keeps arriving can keep a watch open.
+
+`node --test cli/test-request-deadlines.mjs` exercises these paths against
+synthetic loopback stubs using accelerated constants in a private source copy.
+The test asserts the production constants first; it is not a hosted service or
+model test. Maintained by Instinct, acting on behalf of Tal Chaim Damri.
+
 ## The flow
 
 `acq` below is shorthand for however you run the file:
