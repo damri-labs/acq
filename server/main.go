@@ -197,7 +197,7 @@ var (
 	}()
 )
 
-// appendFeedback persists one feedback entry; stdout logging remains the fallback.
+// appendFeedback persists content; app logs carry noncontent diagnostics only.
 // appendFeedback appends one JSON line. It reports whether the entry was
 // definitely NOT stored (the file never opened) versus written but with a
 // failed write/sync (a partial line is then possible in principle; readers
@@ -715,7 +715,7 @@ func handlePublicFeedback(w http.ResponseWriter, req *http.Request) {
 		jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad feedback"})
 		return
 	}
-	log.Printf("feedback_public purpose=%q text=%q", fb.Purpose, fb.Text)
+	log.Printf("feedback_public purpose_bytes=%d text_bytes=%d", len(fb.Purpose), len(fb.Text))
 	stored, ferr := appendFeedback(map[string]any{
 		"ts": time.Now().UTC().Format(time.RFC3339), "source": "web",
 		"purpose": fb.Purpose, "text": fb.Text,
@@ -2297,7 +2297,7 @@ func handleRoom(w http.ResponseWriter, req *http.Request) {
 			jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad feedback"})
 			return
 		}
-		log.Printf("feedback id=%s… seat=%s purpose=%q text=%q", r.id[:4], seat, fb.Purpose, fb.Text)
+		log.Printf("feedback id=%s… seat=%s purpose_bytes=%d text_bytes=%d", r.id[:4], seat, len(fb.Purpose), len(fb.Text))
 		stored, ferr := appendFeedback(map[string]any{
 			"ts": time.Now().UTC().Format(time.RFC3339), "room": r.id[:4], "seat": seat,
 			"purpose": fb.Purpose, "text": fb.Text,
