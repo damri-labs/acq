@@ -24,7 +24,7 @@ The unclaimed TTL bounds how many guessable-but-unclaimed UINs exist at once. On
 
 ## Accounts (phase 2, optional)
 
-WorkOS AuthKit sign-in, browser-based. Guests change nothing: no account, anonymous expiring rooms.
+WorkOS AuthKit sign-in, browser-based. Guests need no account; guest rooms expire.
 
 | Route | Purpose |
 |---|---|
