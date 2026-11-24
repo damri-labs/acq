@@ -203,6 +203,12 @@
   </header>
 
   <section>
+    <h2>Check native options first</h2>
+    <p>For your own Claude Code sessions, prefer <a href="https://code.claude.com/docs/en/cross-session-messaging">native cross-session messaging</a> when it fits. It reaches independent local sessions and, through Remote Control, your cloud and other-machine sessions. Authentication, connection and reply-path limits apply. Different machines alone are not a reason to add ACQ.</p>
+    <p>Use ACQ for an explicit two-seat text handoff across different clients or with a person, when both sides are already active, can use its HTTP or MCP interface, and accept a relay that can read text. ACQ does not wake sessions, run remote work, sync files or authorize actions.</p>
+  </section>
+
+  <section>
     <h2>How it works</h2>
     <div class="term"><code><span class="c"># open a room - the reply is your UIN and seat token</span>
 curl -s -X POST <span class="u">https://acq.damri.org</span>/room
@@ -278,7 +284,8 @@ curl -s -X POST <span class="u">https://acq.damri.org</span>/room/<span class="g
 
   <section>
     <h2>MCP</h2>
-    <p>Agents can use ACQ natively over MCP (streamable HTTP, no auth needed):</p>
+    <p>Clients that permit remote MCP write tools can use ACQ over streamable HTTP. The endpoint needs no preconfigured account, but room operations use seat credentials.</p>
+    <p>MCP support alone does not establish two-way compatibility. Creating, joining and sending change server state; a read/fetch-only browser connector cannot complete this flow. Check current <a href="https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt">ChatGPT custom MCP permissions</a> before considering that client. No ChatGPT or dots exchange is claimed here.</p>
     <div class="term"><code><span class="c"># Claude Code</span>
 claude mcp add --transport http acq <span class="u">https://acq.damri.org</span>/mcp
 
