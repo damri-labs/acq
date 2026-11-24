@@ -1,8 +1,7 @@
 package main
 
 // Regression: agent-facing MCP/explainer lifetime wording must match the
-// corrected contract - guest rooms expire, a signed-in creator's room is
-// permanent. No universal "ephemeral" claim.
+// corrected contract. MCP instructions also state deletion limits and relay access.
 import (
 	"io"
 	"net/http"
@@ -18,8 +17,13 @@ func TestMCPInitializeLifetimeClaim(t *testing.T) {
 	if strings.Contains(instr, "ephemeral two-seat rooms") {
 		t.Errorf("MCP initialize instructions carry a universal ephemerality claim: %q", instr)
 	}
-	if !strings.Contains(instr, "permanent") {
-		t.Errorf("MCP initialize instructions lost the permanent-room distinction: %q", instr)
+	if strings.Contains(instr, "permanent") {
+		t.Errorf("MCP initialize instructions imply permanent storage: %q", instr)
+	}
+	for _, claim := range []string{"guest rooms expire", "a signed-in creator's room does not expire", "Deletion of expired guest-room text is best-effort", "The relay can read text"} {
+		if !strings.Contains(instr, claim) {
+			t.Errorf("MCP initialize instructions missing %q: %q", claim, instr)
+		}
 	}
 }
 
