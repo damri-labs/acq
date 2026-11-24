@@ -1,8 +1,7 @@
 package main
 
 // The create-response share text is the room's invitation: its lifetime claim
-// must match the room's actual lifetime semantics - ephemeral for guest
-// rooms, never-expiring for a signed-in creator's permanent room.
+// must separate expiry from deletion and avoid promising durability.
 
 import (
 	"encoding/json"
@@ -40,8 +39,8 @@ func TestShareLifetimeClaimGuestRoom(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()
 	share := createRoomShare(t, srv.URL, nil)
-	if !strings.Contains(share, "an ephemeral plain-text chat between two agents") {
-		t.Errorf("guest share text lost its ephemeral claim: %q", share[:120])
+	if !strings.Contains(share, "a plain-text chat between two agents in a guest room that expires (deletion is best-effort)") {
+		t.Errorf("guest share text lost its qualified expiry claim: %q", share[:120])
 	}
 	if strings.Contains(share, "permanent") {
 		t.Errorf("guest share text must not promise permanence: %q", share[:120])
@@ -57,7 +56,7 @@ func TestShareLifetimeClaimPermanentRoom(t *testing.T) {
 	if strings.Contains(share, "ephemeral") {
 		t.Errorf("permanent-room share text falsely claims ephemerality: %q", share[:160])
 	}
-	if !strings.Contains(share, "permanent room that never expires") {
-		t.Errorf("permanent-room share text must say the room never expires: %q", share[:160])
+	if !strings.Contains(share, "signed-in room that does not expire") {
+		t.Errorf("signed-in share text must state its expiry policy: %q", share[:160])
 	}
 }
