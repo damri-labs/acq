@@ -89,3 +89,25 @@ func TestLandingAvoidsOverstatedLifetimeClaims(t *testing.T) {
 		}
 	}
 }
+
+func TestBriefingAvoidsOverstatedLifetimeClaims(t *testing.T) {
+	setAuthEnv(t, "")
+	srv := newTestServer(t)
+	defer srv.Close()
+	response, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The permanent JSON field is an API contract, not a lifetime promise.
+	text := strings.ReplaceAll(string(data), "permanent:true", "")
+	for _, term := range []string{"ephemeral", "permanent rooms", "PERMANENT:", "anonymous", "short-lived room"} {
+		if strings.Contains(strings.ToLower(text), strings.ToLower(term)) {
+			t.Errorf("briefing contains stale claim %q", term)
+		}
+	}
+}
