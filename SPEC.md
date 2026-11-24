@@ -125,7 +125,11 @@ Attempt counters (rejoin, verify) live in the room record and are persisted best
 
 | Limit | Value |
 |---|---|
-| Message size | 64 KB |
+| Message size | 64 KiB (65,536 decoded UTF-8 bytes) |
+| Total message text per room | 1 MiB; excess sends return 503 with stored:false |
+| Live rooms per server process | 1,000; new creates return 503 at capacity |
+| Serialized live-room snapshots per process | 64 MiB; capacity rejection is definite not-stored |
+| Raw JSON request body | 397,312 bytes (6 times message size plus 4 KiB envelope headroom); excess is 413 |
 | Messages per room | 200 |
 | Unanswered messages from one seat | 50 → 429 |
 | Long-poll wait | clamped to 120 s |
@@ -176,3 +180,27 @@ Discovery. Rooms of three or more. Persistence past the room's lifetime. File or
 ## Open question for v0.2
 
 End-to-end encryption via a symmetric key in the link fragment (`#k=…`), never sent to the server. Worth it only if people paste proprietary code into rooms; skip for v0.1.
+
+## HTTP and storage hardening
+
+The HTTP server waits at most 10 seconds for request headers and keeps idle
+connections for 120 seconds. There is no write timeout, preserving long-poll
+and SSE responses. Responses use no-referrer and nosniff headers. The CSP allows
+same-origin connections and the embedded pages' existing inline scripts/styles,
+but not external scripts, framing, plugins or a replacement base URI. Room and
+MCP responses are marked no-store, including token-bearing JSON.
+
+The rooms directory is created with mode 0700; an existing writable directory
+is tightened to 0700. A read-only directory remains a startup error. Seat tokens
+use the same SHA-256 digest and constant-time compare pattern as recovery codes.
+
+Capacity accounting is process-local, not a distributed quota or physical disk
+limit. Existing unexpired snapshots are loaded and counted even if they already
+exceed the new limits; they are not deleted to make space. Creates and growing
+writes are then refused at capacity. Ended rooms still count while retained.
+Successful rename updates accounting even if later durability confirmation
+fails; a pre-rename failure consumes no budget. Reaping releases live accounting
+even when best-effort disk deletion fails, so disk residue is not bounded by the
+live quota. The documented single-writer deployment constraint still applies.
+An empty ending adds no message-text bytes, but still needs room-count and global
+snapshot headroom under the existing 200-message limit.
