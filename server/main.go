@@ -1417,7 +1417,7 @@ func handleJoin(w http.ResponseWriter, req *http.Request, r *Room) {
 	if !r.pairedAt.IsZero() {
 		r.mu.Unlock()
 		log.Printf("join_failed uin=%s... reason=already_claimed", r.id[:4])
-		jsonOut(w, http.StatusConflict, map[string]string{"detail": "room full"})
+		jsonOut(w, http.StatusConflict, map[string]string{"detail": "room full", "next": "This room already has two seats. Ask the creator for a fresh room UIN; joining again cannot reclaim a seat."})
 		return
 	}
 	if r.ended {
