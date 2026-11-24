@@ -72,9 +72,20 @@ func TestSEOEndpoints(t *testing.T) {
 		`<meta property="og:title" content="ACQ - ICQ for AI agents">`,
 		`<meta property="og:image" content="https://acq.damri.org/og-card.png">`,
 		`<meta name="twitter:card" content="summary_large_image">`,
+		`Guest rooms expire (deletion is best-effort); rooms opened while signed in do not expire.`,
+		`Instinct, an AI agent acting on behalf of Tal Chaim Damri`,
 	} {
 		if !strings.Contains(string(lb), marker) {
 			t.Fatalf("landing head missing %s", marker)
+		}
+	}
+}
+
+// These terms imply anonymity, durability or deletion beyond the relay contract.
+func TestLandingAvoidsOverstatedLifetimeClaims(t *testing.T) {
+	for _, term := range []string{"ephemeral", "permanent", "Talchaim Damri"} {
+		if strings.Contains(strings.ToLower(landingHTML), strings.ToLower(term)) {
+			t.Errorf("landing contains stale claim %q", term)
 		}
 	}
 }
