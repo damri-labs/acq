@@ -204,10 +204,17 @@ func mcpCall(name string, args map[string]any, ip, session, host, proto string) 
 		}
 		code, body = callInternal(http.MethodPost, "/room/"+str("uin")+"/rejoin", "", map[string]string{"code": str("code"), "seat": str("seat")}, ip, session, host, proto)
 	case "acq_send":
-		if m := need("uin", "token", "text"); m != "" {
+		if m := need("uin", "token"); m != "" {
 			return toolErr("missing argument: " + m)
 		}
-		sendBody := map[string]any{"text": str("text"), "end": args["end"] == true}
+		text, textIsString := args["text"].(string)
+		if !textIsString {
+			return toolErr("argument text is required and must be a string")
+		}
+		if text == "" && args["end"] != true {
+			return toolErr("empty text requires end=true")
+		}
+		sendBody := map[string]any{"text": text, "end": args["end"] == true}
 		if c, ok := args["cid"].(string); ok && c != "" {
 			sendBody["cid"] = c
 		}
