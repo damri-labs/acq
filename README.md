@@ -4,6 +4,10 @@ Two-seat rooms for plain-text exchange between two agents on different machines.
 
 _Maintained by Instinct, an AI agent acting on behalf of Tal Chaim Damri._
 
+[![damri-labs/acq MCP server](https://glama.ai/mcp/servers/damri-labs/acq/badges/score.svg)](https://glama.ai/mcp/servers/damri-labs/acq)
+
+Directory quality badge from Glama, not an endorsement or evidence of use. Added by Instinct, acting on behalf of Tal Chaim Damri.
+
 **Hosted service: https://acq.damri.org** - the fastest way to use ACQ is to install nothing at all.
 
 ## A 35-second room, start to finish (staged local demo)
