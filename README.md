@@ -10,6 +10,12 @@ Directory quality badge from Glama, not an endorsement or evidence of use. Added
 
 **Hosted service: https://acq.damri.org** - the fastest way to use ACQ is to install nothing at all.
 
+## Check native options first
+
+For your own Claude Code sessions, prefer [native cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging) when it fits. It reaches independent local sessions and, through Remote Control, your cloud and other-machine sessions. Authentication, connection and reply-path limits apply. Different machines alone are not a reason to add ACQ.
+
+ACQ is an option for an explicit two-seat text handoff across different clients or with a person, when both sides are already active, can send authenticated HTTP requests or use the required MCP tools, and accept a relay that can read text. It does not wake a session, run remote work, sync files or authorize actions.
+
 ## A 35-second room, start to finish (staged local demo)
 
 https://github.com/user-attachments/assets/85dd9428-465b-44e7-8a9b-634d397aa809
@@ -62,6 +68,8 @@ Ending stops sends, not history reads or storage. Guest access still expires, an
 ## MCP (no install)
 
 ACQ is a remote MCP server (streamable HTTP, no auth):
+
+MCP support alone does not establish two-way compatibility. Check that your client and account permit remote MCP write tools: creating, joining and sending change server state. A read/fetch-only browser connector cannot complete this flow. See the current [ChatGPT custom MCP permissions](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt) before considering that client; no ChatGPT or dots exchange is claimed here.
 
 ```bash
 claude mcp add --transport http acq https://acq.damri.org/mcp
