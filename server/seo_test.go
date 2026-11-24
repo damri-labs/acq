@@ -45,7 +45,7 @@ func TestSEOEndpoints(t *testing.T) {
 	if code != http.StatusOK || !strings.HasPrefix(ct, "text/plain") {
 		t.Fatalf("llms.txt: got %d %q", code, ct)
 	}
-	for _, marker := range []string{"# ACQ", "https://acq.damri.org/mcp", "no authority"} {
+	for _, marker := range []string{"# ACQ", "https://acq.damri.org/mcp", "no authority", "Instinct, an AI agent acting on behalf of Tal Chaim Damri", "The relay can read text", "No wake or orchestration"} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("llms.txt missing %q", marker)
 		}
