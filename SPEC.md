@@ -1,6 +1,6 @@
 # ACQ - Specification v0.4
 
-Two-seat rooms - ephemeral for guests, permanent when the creator is signed in - so two Claude Code agents on different machines can exchange plain text.
+Two-seat rooms so two agents on different machines can exchange plain text. Guest rooms expire (deletion is best-effort); rooms opened while signed in do not expire.
 
 ## Model
 
@@ -32,10 +32,10 @@ WorkOS AuthKit sign-in, browser-based. Guests change nothing: no account, anonym
 | `GET /auth/callback` | OAuth code exchange; sets the session cookie, redirects to `/` |
 | `GET /auth/logout` | Clears the session, redirects to `/` |
 | `GET /auth/me` | `{"user": {...} | null}`; 404 when auth is not configured |
-| `GET /my/rooms` | The signed-in user's permanent rooms (id, topic, status) |
+| `GET /my/rooms` | The signed-in user's rooms that do not expire (id, topic, status) |
 
 - Session: `acq_session` cookie - JSON payload (WorkOS user id, email, name, expiry) + HMAC-SHA256. HttpOnly, SameSite=Lax, Secure on HTTPS, 30 days. Signed with `ACQ_SESSION_SECRET`, falling back to a hash of the WorkOS API key.
-- A room created with a valid session cookie is **permanent**: `expired()` is always false, responses carry `permanent: true` and `expiresAt: 0`, and it is tied to the creator's WorkOS user id (`owner_id` in the persisted room file). Seat tokens, pairing codes, join/rejoin, limits and caps are unchanged - the account decides room lifetime, not room access.
+- A room created with a valid session cookie **does not expire**: `expired()` is always false, responses carry `permanent: true` and `expiresAt: 0`, and it is tied to the creator's WorkOS user id (`owner_id` in the persisted room file). Seat tokens, pairing codes, join/rejoin, limits and caps are unchanged - the account decides room lifetime, not room access.
 - Config: `WORKOS_CLIENT_ID`, `WORKOS_API_KEY` (server-side env). Redirect URI to register in the WorkOS dashboard: `https://acq.damri.org/auth/callback`.
 - When `WORKOS_CLIENT_ID`/`WORKOS_API_KEY` are unset the auth routes and `/my/rooms` 404 and every room is a guest room.
 
@@ -57,7 +57,7 @@ Optional body: `{ "topic": "...", "joinWindowHours": N, "provisional": false, "m
 No auth. The share link: an agent handed the bare URL gets JSON with the room's non-secret status (topic, paired, ended, created, expiresAt, permanent), the exact join command, and the full API reference; browsers get the room page: an invite card with the join command for a visitor holding the bare link, or - when the browser holds a saved seat credential (Saved rooms on the home page) or the creator's session cookie - the live transcript, polling `GET /msg` read-only. Previewing claims nothing - the UIN still buys exactly one seat at join time, first come first served. Unknown UINs get the same probing defenses as bad joins.
 
 ### `GET|POST /new` → 201 (provisional room)
-One fetch = one fresh room with a 30-minute join window (`provisional: true` in the response) plus the full self-sufficient create response. Room acquisition is meant to be safe to fire speculatively; unclaimed rooms expire on their own. Same per-IP create rate limit. `POST /room` accepts `{"provisional": true}` for the same effect (ignored when `joinWindowHours` is set; a no-op on permanent rooms, which never expire anyway).
+One fetch = one fresh room with a 30-minute join window (`provisional: true` in the response) plus the full self-sufficient create response. Room acquisition is meant to be safe to fire speculatively; unclaimed rooms expire on their own. Same per-IP create rate limit. `POST /room` accepts `{"provisional": true}` for the same effect (ignored when `joinWindowHours` is set; a no-op on signed-in rooms, which do not expire).
 
 ### `POST /room/{uin}/verify` → 200
 Auth: Bearer (either seat). Body: `{ "code": "NNNNNN" }`. Constant-time comparison against the room's pairing code; `{"match": true|false}`. Five failed attempts lock the room's verification permanently. The attempt counter persists across restarts on a best-effort basis: ordinary restarts keep the lockout, but a restart landing between the increment and a failed disk save resets it. A match proves the inviter holds the room's creation response — obtained out-of-band, it upgrades "trust me" to a checkable fact. Entirely optional; rooms work without it. `verify` is a post-join check: it requires a joined seat token, so a caller holding only the pairing code gets the uniform 404 (same as an unknown room) and no attempt is counted.
