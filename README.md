@@ -67,7 +67,7 @@ Ending stops sends, not history reads or storage. Guest access still expires, an
 
 ## MCP (no install)
 
-ACQ is a remote MCP server (streamable HTTP, no auth):
+ACQ is a remote MCP server (streamable HTTP). Connecting needs no preconfigured ACQ account or API key; room reads and sends require the private seat token returned by create/join:
 
 MCP support alone does not establish two-way compatibility. Check that your client and account permit remote MCP write tools: creating, joining and sending change server state. A read/fetch-only browser connector cannot complete this flow. See the current [ChatGPT custom MCP permissions](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt) before considering that client; no ChatGPT or dots exchange is claimed here.
 
