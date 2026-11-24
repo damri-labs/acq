@@ -311,7 +311,7 @@ var roomsDir = func() string {
 // private file, never truncates a pre-existing path, and reports cleanup errors.
 // Passing is a point-in-time write check, not a durability or future-health guarantee.
 func storageProbe() error {
-	if err := os.MkdirAll(roomsDir, 0755); err != nil {
+	if err := privateRoomsDir(); err != nil {
 		return fmt.Errorf("rooms directory %s cannot be created: %w (set ROOMS_DIR to a writable directory)", roomsDir, err)
 	}
 	probe, err := os.CreateTemp(roomsDir, ".acq-startup-probe-*")
@@ -391,11 +391,16 @@ var persistFailMode = os.Getenv("ACQ_TEST_PERSIST_FAIL")
 // contract: on the supported local filesystem a rename either happens or
 // returns an error.
 func writeRoom(d roomDisk) (persistOutcome, error) {
+	budgetMu.Lock()
+	defer budgetMu.Unlock()
 	b, err := json.Marshal(d)
 	if err != nil {
 		return persistFailedDefinite, err
 	}
-	if err := os.MkdirAll(roomsDir, 0755); err != nil {
+	if liveBytes-snapshotBytes[d.ID]+len(b) > maxLiveBytes && len(b) > snapshotBytes[d.ID] {
+		return persistFailedDefinite, errCapacity
+	}
+	if err := privateRoomsDir(); err != nil {
 		return persistFailedDefinite, err
 	}
 	if persistFailMode == "pre" {
@@ -423,6 +428,8 @@ func writeRoom(d roomDisk) (persistOutcome, error) {
 	if err := os.Rename(tmp, filepath.Join(roomsDir, d.ID+".json")); err != nil {
 		return persistFailedDefinite, err
 	}
+	liveBytes += len(b) - snapshotBytes[d.ID]
+	snapshotBytes[d.ID] = len(b)
 	if persistFailMode == "post" {
 		return persistAmbiguous, errors.New("injected post-rename dir-sync failure")
 	}
@@ -468,7 +475,10 @@ func storageAmbiguous(w http.ResponseWriter, detail string, payload any) {
 var osRemove = os.Remove
 
 func deleteRoomFile(id string) error {
-	return osRemove(filepath.Join(roomsDir, id+".json"))
+	err := osRemove(filepath.Join(roomsDir, id+".json"))
+	// Live accounting ends on reap even if best-effort disk deletion fails.
+	forgetSnapshot(id)
+	return err
 }
 
 // refreshRoomFromDiskLocked is the send path's guard for the
@@ -516,6 +526,7 @@ func refreshRoomFromDiskLocked(r *Room) (gone bool) {
 			return true
 		}
 		r.reaped = true
+		forgetSnapshot(r.id)
 		addTombstone(r.id)
 		// Wake parked readers so they answer 410 now instead of sleeping
 		// out their wait. Close-then-renew keeps every channel instance
@@ -550,6 +561,7 @@ func refreshRoomFromDiskLocked(r *Room) (gone bool) {
 		log.Printf("room_overlap_parse_error id=%s...", r.id[:4])
 		return false
 	}
+	rememberSnapshot(d.ID, len(b))
 	r.tokenA, r.tokenB = d.TokenA, d.TokenB
 	r.created, r.pairedAt, r.lastMsg = d.Created, d.PairedAt, d.LastMsg
 	r.msgs, r.ended = d.Msgs, d.Ended
@@ -610,6 +622,7 @@ func loadRooms() {
 		}
 		roomsMu.Lock()
 		rooms[r.id] = r
+		rememberSnapshot(r.id, len(b))
 		roomsMu.Unlock()
 		loaded++
 	}
@@ -1190,7 +1203,7 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 	}
 	if err := json.NewDecoder(req.Body).Decode(&createBody); err != nil && err != io.EOF {
 		// Malformed JSON must not silently produce a default room.
-		jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad request body"})
+		badBody(w, err, "bad request body")
 		return
 	}
 	if provisionalDefault && createBody.JoinWindowHours == 0 {
@@ -1264,6 +1277,11 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 	var perr error
 	registered := false
 	roomsMu.Lock()
+	if len(rooms) >= maxLiveRooms {
+		roomsMu.Unlock()
+		jsonOut(w, 503, map[string]any{"detail": "live-room capacity reached; room not created", "stored": false})
+		return
+	}
 	for attempt := 0; attempt < 3 && !registered; attempt++ {
 		u := randUIN()
 		if _, exists := rooms[u]; exists {
@@ -1283,6 +1301,10 @@ func handleCreateOpt(w http.ResponseWriter, req *http.Request, provisionalDefaul
 	}
 	roomsMu.Unlock()
 	if outcome == persistFailedDefinite {
+		if errors.Is(perr, errCapacity) {
+			jsonOut(w, 503, map[string]any{"detail": "live-room storage capacity reached; room not created", "stored": false})
+			return
+		}
 		log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
 		storageFailure(w, "room")
 		return
@@ -1343,13 +1365,13 @@ func seatFor(r *Room, req *http.Request) string {
 	if !ok {
 		return ""
 	}
-	switch tok {
-	case r.tokenA:
+	matchA := codeMatch(tok, r.tokenA)
+	matchB := codeMatch(tok, r.tokenB)
+	if matchA && r.tokenA != "" {
 		return "A"
-	case r.tokenB:
-		if r.tokenB != "" {
-			return "B"
-		}
+	}
+	if matchB && r.tokenB != "" {
+		return "B"
 	}
 	return ""
 }
@@ -1766,7 +1788,7 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 		Cid  string `json:"cid"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		jsonOut(w, http.StatusBadRequest, map[string]string{"detail": "bad message"})
+		badBody(w, err, "bad message")
 		return
 	}
 	if len(body.Text) > maxMsgSize {
@@ -1836,6 +1858,10 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 		jsonOut(w, http.StatusTooManyRequests, map[string]string{"detail": "unanswered cap reached"})
 		return
 	}
+	if len(body.Text) > 0 && messageBytes(r.msgs)+len(body.Text) > maxRoomBytes {
+		jsonOut(w, 503, map[string]any{"detail": "room message bytes cap reached; message not stored", "stored": false})
+		return
+	}
 	end := body.End && allowEnd
 	m := Msg{Seq: len(r.msgs) + 1, From: seat, Ts: float64(time.Now().UnixMilli()) / 1000, Text: body.Text, End: end, Cid: body.Cid}
 	// Candidate-first persistence: the message is committed to memory and
@@ -1855,6 +1881,10 @@ func handleSendAs(w http.ResponseWriter, req *http.Request, r *Room, seat string
 	}
 	outcome, perr := writeRoom(candidate)
 	if outcome == persistFailedDefinite {
+		if errors.Is(perr, errCapacity) {
+			jsonOut(w, 503, map[string]any{"detail": "live-room storage capacity reached; message not stored", "stored": false})
+			return
+		}
 		log.Printf("room_save_error id=%s... err=%v", r.id[:4], perr)
 		storageFailure(w, "message")
 		return
@@ -2434,7 +2464,7 @@ func main() {
 	loadAnalytics()
 	loadRooms()
 	go janitor()
-	srv := &http.Server{Addr: ":" + port, Handler: http.MaxBytesHandler(mux, maxMsgSize+4096)}
+	srv := &http.Server{Addr: ":" + port, Handler: hardenHTTP(mux), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	// Graceful shutdown: a platform stop (SIGTERM, e.g. a rolling redeploy)
 	// is a planned event, not a crash - drain in-flight requests and exit 0
 	// so the platform does not report the replacement as a failure. main

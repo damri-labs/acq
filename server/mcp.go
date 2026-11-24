@@ -49,17 +49,17 @@ func handleMCP(w http.ResponseWriter, req *http.Request) {
 		Method  string          `json:"method"`
 		Params  json.RawMessage `json:"params"`
 	}
-	// The envelope budget is the message cap plus headroom - the same
-	// maxMsgSize+4096 the outer mux allows - so a legitimate 64 KB message
+	// The envelope budget allows worst-case JSON escaping plus headroom,
+	// matching the outer mux, so a legitimate 64 KB message
 	// fits. Over that, answer with a readable protocol-shaped 413 instead of
 	// a misleading parse error on the truncated body.
-	raw, rerr := io.ReadAll(io.LimitReader(req.Body, maxMsgSize+4096+1))
-	if rerr != nil || len(raw) > maxMsgSize+4096 {
+	raw, rerr := io.ReadAll(io.LimitReader(req.Body, maxRequestBytes+1))
+	if rerr != nil || len(raw) > maxRequestBytes {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{
 			"code":    -32600,
-			"message": "request too large: message text is capped at 64 KB (65536 bytes); the whole JSON-RPC envelope must fit in 69632 bytes",
+			"message": "request too large: message text is capped at 64 KB (65536 bytes); the whole JSON-RPC envelope must fit in 397312 bytes",
 		}})
 		return
 	}

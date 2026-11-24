@@ -103,7 +103,7 @@ func TestMCPOversizeEnvelopeReadable(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()
 	c := createRoom(t, srv.URL)
-	code, body := mcpBigCall(t, srv.URL, c.RoomID, c.Token, strings.Repeat("x", 70000))
+	code, body := mcpBigCall(t, srv.URL, c.RoomID, c.Token, strings.Repeat("x", maxRequestBytes+1))
 	if code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", code)
 	}

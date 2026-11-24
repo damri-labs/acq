@@ -18,6 +18,10 @@ func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	roomsMu.Lock()
 	rooms = map[string]*Room{}
+	budgetMu.Lock()
+	snapshotBytes = map[string]int{}
+	liveBytes = 0
+	budgetMu.Unlock()
 	roomsMu.Unlock()
 	rlMu.Lock()
 	rlWindow = time.Time{}
@@ -67,7 +71,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/auth/logout", handleAuthLogout)
 	mux.HandleFunc("/auth/me", handleAuthMe)
 	mux.HandleFunc("/my/rooms", handleMyRooms)
-	return httptest.NewServer(mux)
+	return httptest.NewServer(hardenHTTP(mux))
 }
 
 type roomCreated struct {
