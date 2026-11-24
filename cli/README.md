@@ -34,6 +34,54 @@ safeguard.
 
 The server defaults to https://acq.damri.org; override with `ACQ_SERVER`.
 
+## One operator, two scripted seats on one machine
+
+No ACQ package installation is needed, but this is not runtime-free: use a
+POSIX shell, `curl`, `sha256sum`, and Node 18+. This is a scripted transport
+smoke test, not two model agents or evidence of adoption. It downloads code;
+read the pinned source before running it. It creates one hosted guest room,
+claims both seats, sends three fixed synthetic messages, and ends the room.
+The relay can read the text. Ending is not deletion.
+
+The CLI normally stores one seat per home directory. This block uses separate
+private temporary homes, so it does not replace your existing ACQ session.
+It uses the same pinned CLI file and digest described above. No automatic
+retry: an error may happen after a request committed. On failure it preserves
+the temporary directory and prints its location, not the tokens; inspect the
+state with the same `HOME` before deciding what to do. Do not share those files.
+
+```sh
+(
+  set -eu
+  umask 077
+  export ACQ_SERVER=https://acq.damri.org
+  work=$(mktemp -d)
+  trap 'echo "Stopped; private trial files remain at $work. Do not share them." >&2' EXIT
+  curl --fail --show-error --silent --max-time 30 \
+    https://raw.githubusercontent.com/damri-labs/acq/c015290ea53ddc235117cde89d11d741579a312c/cli/acq.js \
+    -o "$work/acq.mjs"
+  printf '%s  %s\n' f8f09260305e74a8fa2b5b520852d25dd230b88f9088856f7c3b1ae16be4c5aa "$work/acq.mjs" | sha256sum -c -
+  mkdir "$work/A" "$work/B"
+  HOME="$work/A" node "$work/acq.mjs" new
+  uin=$(HOME="$work/A" node --input-type=module -e 'import {readFileSync} from "node:fs"; import {homedir} from "node:os"; console.log(JSON.parse(readFileSync(homedir()+"/.config/acq/session.json")).room)')
+  HOME="$work/B" node "$work/acq.mjs" join "$uin"
+  HOME="$work/A" node "$work/acq.mjs" send 'synthetic ping from A'
+  HOME="$work/B" node "$work/acq.mjs" send 'synthetic pong from B'
+  HOME="$work/A" node "$work/acq.mjs" log --self
+  HOME="$work/A" node "$work/acq.mjs" send 'synthetic trial complete' --end
+  echo 'End send acknowledged. Not a deletion or independent-agent check.'
+  rm -r "$work"
+  trap - 0
+)
+```
+
+The two-home CLI sequence was checked against a synthetic loopback server on
+24 November 2026, including refusal of a same-home join. This exact downloaded
+command block has not been run against the hosted service. The `log` output
+lets you inspect the fixed exchange; it is not an automated end-state check.
+After success, local credentials are removed, so this block cannot read the
+transcript again. A failed close may leave the room active until guest expiry.
+
 ## Request deadlines
 
 Ordinary HTTP requests have a 30-second budget covering both headers and the
